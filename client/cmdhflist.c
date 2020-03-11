@@ -11,6 +11,19 @@
 
 #include "cmdhflist.h"
 
+#include <inttypes.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "commonutil.h"  // ARRAYLEN
+#include "mifare/mifarehost.h"
+#include "mifare/mifaredefault.h"
+#include "parity.h"         // oddparity
+#include "ui.h"
+#include "crc16.h"
+#include "crapto1/crapto1.h"
+#include "protocols.h"
+
 enum MifareAuthSeq {
     masNone,
     masNt,
@@ -44,7 +57,11 @@ void ClearAuthData() {
 
 uint8_t iso14443A_CRC_check(bool isResponse, uint8_t *d, uint8_t n) {
     if (n < 3) return 2;
-    if (isResponse & (n < 6)) return 2;
+    if (isResponse && (n < 6)) return 2;
+    if (n > 2 && d[1] == 0x50 &&
+            d[0] >= ISO14443A_CMD_ANTICOLL_OR_SELECT &&
+            d[0] <= ISO14443A_CMD_ANTICOLL_OR_SELECT_3)
+        return 2;
     return check_crc(CRC_14443_A, d, n);
 }
 
@@ -53,9 +70,15 @@ uint8_t mifare_CRC_check(bool isResponse, uint8_t *data, uint8_t len) {
         case masNone:
         case masError:
             return iso14443A_CRC_check(isResponse, data, len);
-        default:
-            return 2;
+        case masNt:
+        case masNrAr:
+        case masAt:
+        case masAuthComplete:
+        case masFirstData:
+        case masData:
+            break;
     }
+    return 2;
 }
 
 /**
@@ -72,6 +95,10 @@ uint8_t iso14443B_CRC_check(uint8_t *d, uint8_t n) {
 
 uint8_t iso15693_CRC_check(uint8_t *d, uint8_t n) {
     return check_crc(CRC_15693, d, n);
+}
+
+uint8_t felica_CRC_check(uint8_t *d, uint8_t n) {
+    return check_crc(CRC_FELICA, d, n);
 }
 
 /**
@@ -137,20 +164,38 @@ int applyIso14443a(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
             break;
         case ISO14443A_CMD_ANTICOLL_OR_SELECT: {
             // 93 20 = Anticollision (usage: 9320 - answer: 4bytes UID+1byte UID-bytes-xor)
-            // 93 70 = Select (usage: 9370+5bytes 9320 answer - answer: 1byte SAK)
+            // 93 50 = Bit oriented anti-collision (usage: 9350+ up to 5bytes, 9350 answer - up to 5bytes UID+BCC)
+            // 93 70 = Select (usage: 9370+5bytes 9370 answer - answer: 1byte SAK)
             if (cmd[1] == 0x70)
                 snprintf(exp, size, "SELECT_UID");
-            else
+            else if (cmd[1] == 0x20 || cmd[1] == 0x50)
                 snprintf(exp, size, "ANTICOLL");
+            else
+                snprintf(exp, size, "SELECT_XXX");
             break;
         }
         case ISO14443A_CMD_ANTICOLL_OR_SELECT_2: {
             //95 20 = Anticollision of cascade level2
+            //95 50 = Bit oriented anti-collision level2
             //95 70 = Select of cascade level2
-            if (cmd[2] == 0x70)
+            if (cmd[1] == 0x70)
                 snprintf(exp, size, "SELECT_UID-2");
-            else
+            else if (cmd[1] == 0x20 || cmd[1] == 0x50)
                 snprintf(exp, size, "ANTICOLL-2");
+            else
+                snprintf(exp, size, "SELECT_XXX-2");
+            break;
+        }
+        case ISO14443A_CMD_ANTICOLL_OR_SELECT_3: {
+            //97 20 = Anticollision of cascade level3
+            //97 50 = Bit oriented anti-collision level3
+            //97 70 = Select of cascade level3
+            if (cmd[1] == 0x70)
+                snprintf(exp, size, "SELECT_UID-3");
+            else if (cmd[1] == 0x20 || cmd[1] == 0x50)
+                snprintf(exp, size, "ANTICOLL-3");
+            else
+                snprintf(exp, size, "SELECT_XXX-3");
             break;
         }
         case ISO14443A_CMD_REQA:
@@ -216,7 +261,7 @@ int applyIso14443a(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
             break;
         case MIFARE_ULEV1_AUTH:
             if (cmdsize == 7)
-                snprintf(exp, size, "PWD-AUTH KEY: 0x%02x%02x%02x%02x", cmd[1], cmd[2], cmd[3], cmd[4]);
+                snprintf(exp, size, "PWD-AUTH KEY: " _YELLOW_("0x%02x%02x%02x%02x"), cmd[1], cmd[2], cmd[3], cmd[4]);
             else
                 snprintf(exp, size, "PWD-AUTH");
             break;
@@ -251,14 +296,26 @@ int applyIso14443a(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
             break;
         }
         case MIFARE_ULEV1_READSIG:
-            snprintf(exp, size, "READ_SIG");
+            snprintf(exp, size, "READ SIG");
             break;
         case MIFARE_ULEV1_CHECKTEAR:
-            snprintf(exp, size, "CHK_TEARING(%d)", cmd[1]);
+            snprintf(exp, size, "CHK TEARING(%d)", cmd[1]);
             break;
         case MIFARE_ULEV1_VCSL:
             snprintf(exp, size, "VCSL");
             break;
+        case MIFARE_ULNANO_WRITESIG:
+            snprintf(exp, size, "WRITE SIG");
+            break;
+        case MIFARE_ULNANO_LOCKSIF: {
+            if (cmd[1] == 0)
+                snprintf(exp, size, "UNLOCK SIG");
+            else if (cmd[1] == 2)
+                snprintf(exp, size, "LOCK SIG");
+            else
+                snprintf(exp, size, "?");
+            break;
+        }
         default:
             return 0;
     }
@@ -270,9 +327,30 @@ void annotateIso14443a(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
 }
 
 void annotateIclass(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
-    switch (cmd[0]) {
+    uint8_t c = cmd[0] & 0x0F;
+    uint8_t parity = 0;
+    for (uint8_t i = 0; i < 7; i++) {
+        parity ^= (cmd[0] >> i) & 1;
+    }
+
+    switch (c) {
+        case ICLASS_CMD_HALT:
+            snprintf(exp, size, "HALT");
+            break;
+        case ICLASS_CMD_SELECT:
+            snprintf(exp, size, "SELECT");
+            break;
         case ICLASS_CMD_ACTALL:
             snprintf(exp, size, "ACTALL");
+            break;
+        case ICLASS_CMD_DETECT:
+            snprintf(exp, size, "DETECT");
+            break;
+        case ICLASS_CMD_CHECK:
+            snprintf(exp, size, "CHECK");
+            break;
+        case ICLASS_CMD_READ4:
+            snprintf(exp, size, "READ4(%d)", cmd[1]);
             break;
         case ICLASS_CMD_READ_OR_IDENTIFY: {
             if (cmdsize > 1) {
@@ -282,35 +360,21 @@ void annotateIclass(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
             }
             break;
         }
-        case ICLASS_CMD_SELECT:
-            snprintf(exp, size, "SELECT");
-            break;
         case ICLASS_CMD_PAGESEL:
             snprintf(exp, size, "PAGESEL(%d)", cmd[1]);
-            break;
-        case ICLASS_CMD_READCHECK_KC:
-            snprintf(exp, size, "READCHECK[Kc](%d)", cmd[1]);
-            break;
-        case ICLASS_CMD_READCHECK_KD:
-            snprintf(exp, size, "READCHECK[Kd](%d)", cmd[1]);
-            break;
-        case ICLASS_CMD_CHECK:
-            snprintf(exp, size, "CHECK");
-            break;
-        case ICLASS_CMD_DETECT:
-            snprintf(exp, size, "DETECT");
-            break;
-        case ICLASS_CMD_HALT:
-            snprintf(exp, size, "HALT");
             break;
         case ICLASS_CMD_UPDATE:
             snprintf(exp, size, "UPDATE(%d)", cmd[1]);
             break;
+        case ICLASS_CMD_READCHECK:
+            if (ICLASS_CREDIT(cmd[0])) {
+                snprintf(exp, size, "READCHECK[Kc](%d)", cmd[1]);
+            } else {
+                snprintf(exp, size, "READCHECK[Kd](%d)", cmd[1]);
+            }
+            break;
         case ICLASS_CMD_ACT:
             snprintf(exp, size, "ACT");
-            break;
-        case ICLASS_CMD_READ4:
-            snprintf(exp, size, "READ4(%d)", cmd[1]);
             break;
         default:
             snprintf(exp, size, "?");
@@ -340,6 +404,9 @@ void annotateIso15693(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
         case ISO15693_READ_MULTI_BLOCK:
             snprintf(exp, size, "READ_MULTI_BLOCK");
             return;
+        case ISO15693_WRITE_MULTI_BLOCK:
+            snprintf(exp, size, "WRITE_MULTI_BLOCK");
+            return;
         case ISO15693_SELECT:
             snprintf(exp, size, "SELECT");
             return;
@@ -363,6 +430,78 @@ void annotateIso15693(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
             return;
         case ISO15693_READ_MULTI_SECSTATUS:
             snprintf(exp, size, "READ_MULTI_SECSTATUS");
+            return;
+        case ISO15693_INVENTORY_READ:
+            snprintf(exp, size, "INVENTORY_READ");
+            return;
+        case ISO15693_FAST_INVENTORY_READ:
+            snprintf(exp, size, "FAST_INVENTORY_READ");
+            return;
+        case ISO15693_SET_EAS:
+            snprintf(exp, size, "SET_EAS");
+            return;
+        case ISO15693_RESET_EAS:
+            snprintf(exp, size, "RESET_EAS");
+            return;
+        case ISO15693_LOCK_EAS:
+            snprintf(exp, size, "LOCK_EAS");
+            return;
+        case ISO15693_EAS_ALARM:
+            snprintf(exp, size, "EAS_ALARM");
+            return;
+        case ISO15693_PASSWORD_PROTECT_EAS:
+            snprintf(exp, size, "PASSWORD_PROTECT_EAS");
+            return;
+        case ISO15693_WRITE_EAS_ID:
+            snprintf(exp, size, "WRITE_EAS_ID");
+            return;
+        case ISO15693_READ_EPC:
+            snprintf(exp, size, "READ_EPC");
+            return;
+        case ISO15693_GET_NXP_SYSTEM_INFO:
+            snprintf(exp, size, "GET_NXP_SYSTEM_INFO");
+            return;
+        case ISO15693_INVENTORY_PAGE_READ:
+            snprintf(exp, size, "INVENTORY_PAGE_READ");
+            return;
+        case ISO15693_FAST_INVENTORY_PAGE_READ:
+            snprintf(exp, size, "FAST_INVENTORY_PAGE_READ");
+            return;
+        case ISO15693_GET_RANDOM_NUMBER:
+            snprintf(exp, size, "GET_RANDOM_NUMBER");
+            return;
+        case ISO15693_SET_PASSWORD:
+            snprintf(exp, size, "SET_PASSWORD");
+            return;
+        case ISO15693_WRITE_PASSWORD:
+            snprintf(exp, size, "WRITE_PASSWORD");
+            return;
+        case ISO15693_LOCK_PASSWORD:
+            snprintf(exp, size, "LOCK_PASSWORD");
+            return;
+        case ISO15693_PROTECT_PAGE:
+            snprintf(exp, size, "PROTECT_PAGE");
+            return;
+        case ISO15693_LOCK_PAGE_PROTECTION:
+            snprintf(exp, size, "LOCK_PAGE_PROTECTION");
+            return;
+        case ISO15693_GET_MULTI_BLOCK_PROTECTION:
+            snprintf(exp, size, "GET_MULTI_BLOCK_PROTECTION");
+            return;
+        case ISO15693_DESTROY:
+            snprintf(exp, size, "DESTROY");
+            return;
+        case ISO15693_ENABLE_PRIVACY:
+            snprintf(exp, size, "ENABLE_PRIVACY");
+            return;
+        case ISO15693_64BIT_PASSWORD_PROTECTION:
+            snprintf(exp, size, "64BIT_PASSWORD_PROTECTION");
+            return;
+        case ISO15693_STAYQUIET_PERSISTENT:
+            snprintf(exp, size, "STAYQUIET_PERSISTENT");
+            return;
+        case ISO15693_READ_SIGNATURE:
+            snprintf(exp, size, "READ_SIGNATURE");
             return;
         default:
             break;
@@ -829,8 +968,7 @@ void annotateLegic(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
 }
 
 void annotateFelica(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
-
-    switch (cmd[0]) {
+    switch (cmd[3]) {
         case FELICA_POLL_REQ:
             snprintf(exp, size, "POLLING");
             break;
@@ -957,6 +1095,49 @@ void annotateFelica(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
     }
 }
 
+void annotateLTO(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
+    switch (cmd[0]) {
+        case LTO_REQ_STANDARD:
+            snprintf(exp, size, "REQ Standard");
+            break;
+        case LTO_SELECT:
+            if (cmd[1] == 0x70)
+                snprintf(exp, size, "SELECT_UID-2");
+            else if (cmd[1] == 0x20)
+                snprintf(exp, size, "SELECT");
+            break;
+        case LTO_REQ_ALL:
+            snprintf(exp, size, "REQ All");
+            break;
+        case LTO_TEST_CMD_1:
+            snprintf(exp, size, "TEST CMD 1");
+            break;
+        case LTO_TEST_CMD_2:
+            snprintf(exp, size, "TEST CMD 2");
+            break;
+        case LTO_READWORD:
+            snprintf(exp, size, "READWORD");
+            break;
+        case (LTO_READBLOCK & 0xF0):
+            snprintf(exp, size, "READBLOCK(%d)", cmd[1]);
+            break;
+        case LTO_READBLOCK_CONT:
+            snprintf(exp, size, "READBLOCK CONT");
+            break;
+        case LTO_WRITEWORD:
+            snprintf(exp, size, "WRITEWORD");
+            break;
+        case (LTO_WRITEBLOCK & 0xF0):
+            snprintf(exp, size, "WRITEBLOCK(%d)", cmd[1]);
+            break;
+        case LTO_HALT:
+            snprintf(exp, size, "HALT");
+            break;
+        default:
+            break;
+    }
+}
+
 void annotateMifare(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize, uint8_t *parity, uint8_t paritysize, bool isResponse) {
     if (!isResponse && cmdsize == 1) {
         switch (cmd[0]) {
@@ -1024,7 +1205,11 @@ void annotateMifare(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize, uint8
                 MifareAuthState = masError;
             }
             break;
-        default:
+        case masNone:
+        case masError:
+        case masAuthComplete:
+        case masFirstData:
+        case masData:
             break;
     }
 
@@ -1035,7 +1220,6 @@ void annotateMifare(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize, uint8
 
 bool DecodeMifareData(uint8_t *cmd, uint8_t cmdsize, uint8_t *parity, bool isResponse, uint8_t *mfData, size_t *mfDataLen) {
     static struct Crypto1State *traceCrypto1;
-    static uint64_t mfLastKey;
 
     *mfDataLen = 0;
 
@@ -1053,12 +1237,13 @@ bool DecodeMifareData(uint8_t *cmd, uint8_t cmdsize, uint8_t *parity, bool isRes
         return false;
 
     if (MifareAuthState == masFirstData) {
+        static uint64_t mfLastKey;
         if (AuthData.first_auth) {
             AuthData.ks2 = AuthData.ar_enc ^ prng_successor(AuthData.nt, 64);
             AuthData.ks3 = AuthData.at_enc ^ prng_successor(AuthData.nt, 96);
 
             mfLastKey = GetCrypto1ProbableKey(&AuthData);
-            PrintAndLogEx(NORMAL, "            |            |  *  |%49s %012"PRIx64" prng %s |     |",
+            PrintAndLogEx(NORMAL, "            |            |  *  |%48s %012"PRIx64" prng %s |     |",
                           "key",
                           mfLastKey,
                           validate_prng_nonce(AuthData.nt) ? _GREEN_("WEAK") : _YELLOW_("HARD"));
@@ -1082,7 +1267,7 @@ bool DecodeMifareData(uint8_t *cmd, uint8_t cmdsize, uint8_t *parity, bool isRes
 
             // check default keys
             if (!traceCrypto1) {
-                for (int i = 0; i < MIFARE_DEFAULTKEYS_SIZE; i++) {
+                for (int i = 0; i < ARRAYLEN(g_mifare_default_keys); i++) {
                     if (NestedCheckKey(g_mifare_default_keys[i], &AuthData, cmd, cmdsize, parity)) {
                         PrintAndLogEx(NORMAL, "            |            |  *  |%61s %012"PRIx64"|     |", "key", g_mifare_default_keys[i]);
 

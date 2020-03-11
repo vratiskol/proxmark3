@@ -10,40 +10,213 @@
 //-----------------------------------------------------------------------------
 #include "scripting.h"
 
+#include <stdlib.h>
+#include <string.h>
+
+#include "lauxlib.h"
+#include "cmdmain.h"
+#include "comms.h"
+#include "mifare/mifarehost.h"
+#include "crc.h"
+#include "crc64.h"
+#include "mbedtls/sha1.h"
+#include "mbedtls/aes.h"
+#include "cmdcrc.h"
+#include "cmdhfmfhard.h"
+#include "cmdhfmfu.h"
+#include "cmdlft55xx.h"   // read t55xx etc
+#include "mifare/ndef.h"  // ndef parsing
+#include "commonutil.h"
+#include "ui.h"
+#include "proxmark3.h"
+#include "crc16.h"
+#include "protocols.h"
+#include "fileutils.h"    // searchfile
+#include "cmdlf.h"        // lf_config
+
+static int returnToLuaWithError(lua_State *L, const char *fmt, ...) {
+    char buffer[200];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    lua_pushnil(L);
+    lua_pushstring(L, buffer);
+    return 2;
+}
+
+static int l_clearCommandBuffer(lua_State *L) {
+    clearCommandBuffer();
+    return 0;
+}
+
 /**
+ * Enable / Disable fast push mode for lua scripts like mfckeys
  * The following params expected:
- *  UsbCommand c
- *@brief l_SendCommand
+ *
+ *@brief l_fast_push_mode
  * @param L
  * @return
  */
-static int l_SendCommand(lua_State *L) {
+static int l_fast_push_mode(lua_State *L) {
 
-    /*
-     The SendCommand (native) expects the following structure:
+    luaL_checktype(L, 1, LUA_TBOOLEAN);
 
-     typedef struct {
-      uint64_t cmd; //8 bytes
-      uint64_t arg[3]; // 8*3 bytes = 24 bytes
-      union {
-        uint8_t  asBytes[USB_CMD_DATA_SIZE]; // 1 byte * 512 = 512 bytes (OR)
-        uint32_t asDwords[USB_CMD_DATA_SIZE/4]; // 4 byte * 128 = 512 bytes
-      } d;
-    } PACKED UsbCommand;
+    bool enable = lua_toboolean(L, 1);
 
-    ==> A 544 byte buffer will do.
-    **/
-    size_t size;
-    const char *data = luaL_checklstring(L, 1, &size);
-    if (size != sizeof(UsbCommand)) {
-        printf("Got data size %d, expected %d", (int) size, (int) sizeof(UsbCommand));
-        lua_pushstring(L, "Wrong data size");
-        return 1;
+    conn.block_after_ACK = enable;
+
+    // Disable fast mode and send a dummy command to make it effective
+    if (enable == false) {
+        SendCommandNG(CMD_PING, NULL, 0);
+        if (!WaitForResponseTimeout(CMD_PING, NULL, 1000)) {
+            PrintAndLogEx(WARNING, "command execution time out");
+            return returnToLuaWithError(L, "command execution time out");
+        }
     }
 
-    SendCommand((UsbCommand *)data);
-    return 0; // no return values
+    //Push the retval on the stack
+    lua_pushboolean(L, enable);
+    return 1;
 }
+
+/**
+ * The following params expected:
+ * @brief l_SendCommandOLD
+ * @param L - a lua string with the following five params.
+ * @param cmd  must be hexstring, max u64
+ * @param arg0  must be hexstring, max u64
+ * @param arg1  must be hexstring, max u64
+ * @param arg2  must be hexstring, max u64
+ * @param data  must be hexstring less than 1024 chars(512bytes)
+ * @return
+ */
+static int l_SendCommandOLD(lua_State *L) {
+//  SendCommandMIX(CMD_HF_SNIFF, skippairs, skiptriggers, 0, NULL, 0);
+// (uint64_t cmd, uint64_t arg0, uint64_t arg1, uint64_t arg2, void *data, size_t len)
+
+    uint64_t cmd, arg0, arg1, arg2;
+    uint8_t data[PM3_CMD_DATA_SIZE] = {0};
+    size_t len = 0, size;
+
+    //Check number of arguments
+    int n = lua_gettop(L);
+    if (n != 5)  {
+        return returnToLuaWithError(L, "You need to supply five parameters");
+    }
+
+    // parse input
+    cmd = luaL_checknumber(L, 1);
+    arg0 = luaL_checknumber(L, 2);
+    arg1 = luaL_checknumber(L, 3);
+    arg2 = luaL_checknumber(L, 4);
+
+    // data
+    const char *p_data = luaL_checklstring(L, 5, &size);
+    if (size) {
+        if (size > 1024)
+            size = 1024;
+
+        uint32_t tmp;
+        for (int i = 0; i < size; i += 2) {
+            sscanf(&p_data[i], "%02x", &tmp);
+            data[i >> 1] = tmp & 0xFF;
+            len++;
+        }
+    }
+
+    SendCommandOLD(cmd, arg0, arg1, arg2, data, len);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+/**
+ * The following params expected:
+ * @brief l_SendCommandMIX
+ * @param L - a lua string with the following five params.
+ * @param cmd  must be hexstring, max u64
+ * @param arg0  must be hexstring, max u64
+ * @param arg1  must be hexstring, max u64
+ * @param arg2  must be hexstring, max u64
+ * @param data  must be hexstring less than 1024 chars(512bytes)
+ * @return
+ */
+static int l_SendCommandMIX(lua_State *L) {
+
+    uint64_t cmd, arg0, arg1, arg2;
+    uint8_t data[PM3_CMD_DATA_SIZE] = {0};
+    size_t len = 0, size;
+
+    // check number of arguments
+    int n = lua_gettop(L);
+    if (n != 5)
+        return returnToLuaWithError(L, "You need to supply five parameters");
+
+    // parse input
+    cmd = luaL_checknumber(L, 1);
+    arg0 = luaL_checknumber(L, 2);
+    arg1 = luaL_checknumber(L, 3);
+    arg2 = luaL_checknumber(L, 4);
+
+    // data
+    const char *p_data = luaL_checklstring(L, 5, &size);
+    if (size) {
+        if (size > 1024)
+            size = 1024;
+
+        uint32_t tmp;
+        for (int i = 0; i < size; i += 2) {
+            sscanf(&p_data[i], "%02x", &tmp);
+            data[i >> 1] = tmp & 0xFF;
+            len++;
+        }
+    }
+
+    SendCommandMIX(cmd, arg0, arg1, arg2, data, len);
+    lua_pushboolean(L, true);
+    return 1;
+}
+/**
+ * The following params expected:
+ * @brief l_SendCommandMIX
+ * @param L - a lua string with the following two params.
+ * @param cmd  must be hexstring, max u64
+ * @param data  must be hexstring less than 1024 chars(512bytes)
+ * @return
+ */
+static int l_SendCommandNG(lua_State *L) {
+
+    uint8_t data[PM3_CMD_DATA_SIZE] = {0};
+    size_t len = 0, size;
+
+    // check number of arguments
+    int n = lua_gettop(L);
+    if (n != 2)
+        return returnToLuaWithError(L, "You need to supply two parameters");
+
+    // parse input
+    uint16_t cmd = luaL_checknumber(L, 1);
+
+    // data
+    const char *p_data = luaL_checklstring(L, 2, &size);
+    if (size) {
+        if (size > 1024)
+            size = 1024;
+
+        uint32_t tmp;
+        for (int i = 0; i < size; i += 2) {
+            sscanf(&p_data[i], "%02x", &tmp);
+            data[i >> 1] = tmp & 0xFF;
+            len++;
+        }
+    }
+
+    SendCommandNG(cmd, data, len);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
 
 /**
  * @brief The following params expected:
@@ -60,35 +233,32 @@ static int l_GetFromBigBuf(lua_State *L) {
     //Check number of arguments
     int n = lua_gettop(L);
     if (n == 0) {
-        //signal error by returning Nil, errorstring
-        lua_pushnil(L);
-        lua_pushstring(L, "You need to supply number of bytes and startindex");
-        return 2; // two return values
+        return returnToLuaWithError(L, "You need to supply number of bytes and startindex");
     }
+
     if (n >= 2) {
         startindex = luaL_checknumber(L, 1);
         len = luaL_checknumber(L, 2);
     }
 
-    uint8_t *data = calloc(len, sizeof(uint8_t));
-    if (!data) {
-        //signal error by returning Nil, errorstring
-        lua_pushnil(L);
-        lua_pushstring(L, "Allocating memory failed");
-        return 2; // two return values
+    if (len == 0) {
+        return returnToLuaWithError(L, "You need to supply number of bytes larger than zero");
     }
 
-    if (!GetFromDevice(BIG_BUF, data, len, startindex, NULL, 2500, false)) {
+    uint8_t *data = calloc(len, sizeof(uint8_t));
+    if (!data) {
+        return returnToLuaWithError(L, "Allocating memory failed");
+    }
+
+    if (!GetFromDevice(BIG_BUF, data, len, startindex, NULL, 0, NULL, 2500, false)) {
         free(data);
-        lua_pushnil(L);
-        lua_pushstring(L, "command execution time out");
-        return 2;
+        return returnToLuaWithError(L, "command execution time out");
     }
 
     //Push it as a string
     lua_pushlstring(L, (const char *)data, len);
     free(data);
-    return 1;// return 1 to signal one return value
+    return 1; // return 1 to signal one return value
 }
 
 /**
@@ -101,51 +271,99 @@ static int l_GetFromBigBuf(lua_State *L) {
  */
 static int l_GetFromFlashMem(lua_State *L) {
 
-#ifndef WITH_FLASH
-    lua_pushnil(L);
-    lua_pushstring(L, "Not compiled with FLASH MEM support");
-    return 2;
-#else
-    int len = 0, startindex = 0;
+    if (IfPm3Flash()) {
+        int len = 0, startindex = 0;
+
+        int n = lua_gettop(L);
+        if (n == 0)
+            return returnToLuaWithError(L, "You need to supply number of bytes and startindex");
+
+        if (n >= 2) {
+            startindex = luaL_checknumber(L, 1);
+            len = luaL_checknumber(L, 2);
+        }
+
+        if (len == 0)
+            return returnToLuaWithError(L, "You need to supply number of bytes larger than zero");
+
+        uint8_t *data = calloc(len, sizeof(uint8_t));
+        if (!data)
+            return returnToLuaWithError(L, "Allocating memory failed");
+
+        if (!GetFromDevice(FLASH_MEM, data, len, startindex, NULL, 0, NULL, -1, false)) {
+            free(data);
+            return returnToLuaWithError(L, "command execution time out");
+        }
+
+        lua_pushlstring(L, (const char *)data, len);
+        free(data);
+        return 1;
+    } else {
+        return returnToLuaWithError(L, "No FLASH MEM support");
+    }
+}
+
+/**
+ * @brief The following params expected:
+ * uint8_t *destfilename
+ * @param L
+ * @return
+ */
+static int l_GetFromFlashMemSpiffs(lua_State *L) {
+
+    if (IfPm3Flash() == false) {
+        return returnToLuaWithError(L, "No FLASH MEM support");
+    }
+
+    uint32_t start_index = 0, len = 0x40000; //FLASH_MEM_MAX_SIZE
+    char destfilename[32] = {0};
+    size_t size;
 
     int n = lua_gettop(L);
-    if (n == 0) {
-        lua_pushnil(L);
-        lua_pushstring(L, "You need to supply number of bytes and startindex");
-        return 2;
+    if (n == 0)
+        return returnToLuaWithError(L, "You need to supply the destination filename");
+
+    if (n >= 1) {
+        const char *p_filename = luaL_checklstring(L, 1, &size);
+        if (size != 0)
+            memcpy(destfilename, p_filename, 31);
     }
-    if (n >= 2) {
-        startindex = luaL_checknumber(L, 1);
-        len = luaL_checknumber(L, 2);
-    }
+
+    if (destfilename[0] == '\0')
+        return returnToLuaWithError(L, "Filename missing or invalid");
+
+    // get size from spiffs itself !
+    SendCommandMIX(CMD_SPIFFS_STAT, 0, 0, 0, (uint8_t *)destfilename, 32);
+    PacketResponseNG resp;
+    if (!WaitForResponseTimeout(CMD_ACK, &resp, 2000))
+        return returnToLuaWithError(L, "No response from the device");
+
+    len = resp.oldarg[0];
+
+    if (len == 0)
+        return returnToLuaWithError(L, "Filename invalid or empty");
 
     uint8_t *data = calloc(len, sizeof(uint8_t));
-    if (!data) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Allocating memory failed");
-        return 2;
-    }
+    if (!data)
+        return returnToLuaWithError(L, "Allocating memory failed");
 
-    if (!GetFromDevice(FLASH_MEM, data, len, startindex, NULL, -1, false)) {
+    if (!GetFromDevice(SPIFFS, data, len, start_index, (uint8_t *)destfilename, 32, NULL, -1, true)) {
         free(data);
-        lua_pushnil(L);
-        lua_pushstring(L, "command execution time out");
-        return 2;
+        return returnToLuaWithError(L, "ERROR; downloading from spiffs(flashmemory)");
     }
 
     lua_pushlstring(L, (const char *)data, len);
+    lua_pushunsigned(L, len);
     free(data);
-    return 1;
-#endif
+    return 2;
 }
-
 
 /**
  * @brief The following params expected:
  * uint32_t cmd
  * size_t ms_timeout
  * @param L
- * @return
+ * @return struct of PacketResponseNG
  */
 static int l_WaitForResponseTimeout(lua_State *L) {
 
@@ -154,45 +372,59 @@ static int l_WaitForResponseTimeout(lua_State *L) {
 
     //Check number of arguments
     int n = lua_gettop(L);
-    if (n == 0)  {
-        //signal error by returning Nil, errorstring
-        lua_pushnil(L);
-        lua_pushstring(L, "You need to supply at least command to wait for");
-        return 2;
-    }
+    if (n == 0)
+        return returnToLuaWithError(L, "You need to supply at least command to wait for");
 
     // extract first param.  cmd byte to look for
-    if (n >= 1) {
+    if (n >= 1)
         cmd = luaL_checkunsigned(L, 1);
-    }
+
     // extract second param. timeout value
-    if (n >= 2) {
+    if (n >= 2)
         ms_timeout = luaL_checkunsigned(L, 2);
-    }
 
-    UsbCommand response;
-    if (WaitForResponseTimeout(cmd, &response, ms_timeout)) {
-        //Push it as a string
-        lua_pushlstring(L, (const char *)&response, sizeof(UsbCommand));
-        return 1;
-    } else {
-        //signal error by returning Nil, errorstring
-        lua_pushnil(L);
-        lua_pushstring(L, "No response from the device");
-        return 2;
-    }
-}
+    PacketResponseNG resp;
+    if (WaitForResponseTimeout(cmd, &resp, ms_timeout) == false)
+        return returnToLuaWithError(L, "No response from the device");
 
-static int returnToLuaWithError(lua_State *L, const char *fmt, ...) {
-    char buffer[200];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
-    va_end(args);
+    char foo[sizeof(PacketResponseNG)];
+    n = 0;
 
-    lua_pushnil(L);
-    lua_pushstring(L, buffer);
-    return 2;
+    memcpy(foo + n, &resp.cmd, sizeof(resp.cmd));
+    n += sizeof(resp.cmd);
+
+    memcpy(foo + n, &resp.length, sizeof(resp.length));
+    n += sizeof(resp.length);
+
+    memcpy(foo + n, &resp.magic, sizeof(resp.magic));
+    n += sizeof(resp.magic);
+
+    memcpy(foo + n, &resp.status, sizeof(resp.status));
+    n += sizeof(resp.status);
+
+    memcpy(foo + n, &resp.crc, sizeof(resp.crc));
+    n += sizeof(resp.crc);
+
+    memcpy(foo + n, &resp.oldarg[0], sizeof(resp.oldarg[0]));
+    n += sizeof(resp.oldarg[0]);
+
+    memcpy(foo + n, &resp.oldarg[1], sizeof(resp.oldarg[1]));
+    n += sizeof(resp.oldarg[1]);
+
+    memcpy(foo + n, &resp.oldarg[2], sizeof(resp.oldarg[2]));
+    n += sizeof(resp.oldarg[2]);
+
+    memcpy(foo + n, resp.data.asBytes, sizeof(resp.data));
+    n += sizeof(resp.data);
+
+    memcpy(foo + n, &resp.ng, sizeof(resp.ng));
+    n += sizeof(resp.ng);
+    (void) n;
+
+    //Push it as a string
+    lua_pushlstring(L, (const char *)&foo, sizeof(foo));
+
+    return 1;
 }
 
 static int l_mfDarkside(lua_State *L) {
@@ -231,10 +463,6 @@ static int l_mfDarkside(lua_State *L) {
     return 2;
 }
 
-static int l_clearCommandBuffer(lua_State *L) {
-    clearCommandBuffer();
-    return 0;
-}
 /**
  * @brief l_foobar is a dummy function to test lua-integration with
  * @param L
@@ -248,7 +476,7 @@ static int l_foobar(lua_State *L) {
     printf("Arguments discarded, stack now contains %d elements", lua_gettop(L));
 
     // todo: this is not used, where was it intended for?
-    // UsbCommand response =  {CMD_MIFARE_READBL, {1337, 1338, 1339}};
+    // PacketCommandOLD response =  {CMD_HF_MIFARE_READBL, {1337, 1338, 1339}, {{0}}};
 
     printf("Now returning a uint64_t as a string");
     uint64_t x = 0xDEADC0DE;
@@ -259,16 +487,16 @@ static int l_foobar(lua_State *L) {
     return 2;
 }
 
-
 /**
  * @brief Utility to check if a key has been pressed by the user. This method does not block.
  * @param L
  * @return boolean, true if kbhit, false otherwise.
  */
-static int l_ukbhit(lua_State *L) {
-    lua_pushboolean(L, ukbhit() ? true : false);
+static int l_kbd_enter_pressed(lua_State *L) {
+    lua_pushboolean(L, kbd_enter_pressed() ? true : false);
     return 1;
 }
+
 /**
  * @brief Calls the command line parser to deal with the command. This enables
  * lua-scripts to do stuff like "core.console('hf mf mifare')"
@@ -282,7 +510,7 @@ static int l_CmdConsole(lua_State *L) {
 
 static int l_iso15693_crc(lua_State *L) {
     uint32_t tmp;
-    unsigned char buf[USB_CMD_DATA_SIZE] = {0x00};
+    unsigned char buf[PM3_CMD_DATA_SIZE] = {0x00};
     size_t size = 0;
     const char *data = luaL_checklstring(L, 1, &size);
 
@@ -299,7 +527,7 @@ static int l_iso15693_crc(lua_State *L) {
 
 static int l_iso14443b_crc(lua_State *L) {
     uint32_t tmp;
-    unsigned char buf[USB_CMD_DATA_SIZE] = {0x00};
+    unsigned char buf[PM3_CMD_DATA_SIZE] = {0x00};
     size_t size = 0;
     const char *data = luaL_checklstring(L, 1, &size);
 
@@ -324,7 +552,8 @@ static int l_aes128decrypt_cbc(lua_State *L) {
     uint32_t tmp;
     size_t size;
     const char *p_key = luaL_checklstring(L, 1, &size);
-    if (size != 32)  return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
+    if (size != 32)
+        return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
 
     const char *p_encTxt = luaL_checklstring(L, 2, &size);
 
@@ -355,7 +584,8 @@ static int l_aes128decrypt_ecb(lua_State *L) {
     uint32_t tmp;
     size_t size;
     const char *p_key = luaL_checklstring(L, 1, &size);
-    if (size != 32)  return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
+    if (size != 32)
+        return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
 
     const char *p_encTxt = luaL_checklstring(L, 2, &size);
 
@@ -386,7 +616,8 @@ static int l_aes128encrypt_cbc(lua_State *L) {
     uint32_t tmp;
     size_t size;
     const char *p_key = luaL_checklstring(L, 1, &size);
-    if (size != 32)  return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
+    if (size != 32)
+        return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
 
     const char *p_txt = luaL_checklstring(L, 2, &size);
 
@@ -417,7 +648,8 @@ static int l_aes128encrypt_ecb(lua_State *L) {
     uint32_t tmp;
     size_t size;
     const char *p_key = luaL_checklstring(L, 1, &size);
-    if (size != 32) return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
+    if (size != 32)
+        return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 32", (int) size);
 
     const char *p_txt = luaL_checklstring(L, 2, &size);
 
@@ -453,7 +685,7 @@ static int l_crc16(lua_State *L) {
     size_t size;
     const char *p_str = luaL_checklstring(L, 1, &size);
 
-    uint16_t checksum = crc(CRC_CCITT, (uint8_t *) p_str, size);
+    uint16_t checksum = Crc16ex(CRC_CCITT, (uint8_t *) p_str, size);
     lua_pushunsigned(L, checksum);
     return 1;
 }
@@ -479,6 +711,7 @@ static int l_crc64(lua_State *L) {
     return 1;
 }
 
+// TO BE IMPLEMENTED
 static int l_crc64_ecma182(lua_State *L) {
     //size_t size;
     uint64_t crc = 0;
@@ -516,11 +749,12 @@ static int l_sha1(lua_State *L) {
 static int l_reveng_models(lua_State *L) {
 
 // This array needs to be adjusted if RevEng adds more crc-models.
-#define NMODELS 105
+#define NMODELS 106
 
     int count = 0;
     uint8_t in_width = luaL_checkunsigned(L, 1);
-    if (in_width > 89) return returnToLuaWithError(L, "Width cannot exceed 89, got %d", in_width);
+    if (in_width > 89)
+        return returnToLuaWithError(L, "Width cannot exceed 89, got %d", in_width);
 
     uint8_t width[NMODELS];
     memset(width, 0, sizeof(width));
@@ -547,7 +781,7 @@ static int l_reveng_models(lua_State *L) {
 // endian    ,char,  'B','b','L','l','t','r' describing if Big-Endian or Little-Endian should be used in different combinations.
 //
 // outputs:  string with hex representation of the CRC result
-static int l_reveng_RunModel(lua_State *L) {
+static int l_reveng_runmodel(lua_State *L) {
     //-c || -v
     //inModel = valid model name string - CRC-8
     //inHexStr = input hex string to calculate crc on
@@ -576,35 +810,44 @@ static int l_hardnested(lua_State *L) {
     size_t size;
     uint32_t tmp;
     const char *p_blockno = luaL_checklstring(L, 1, &size);
-    if (size != 2)  return returnToLuaWithError(L, "Wrong size of blockNo, got %d bytes, expected 2", (int) size);
+    if (size != 2)
+        return returnToLuaWithError(L, "Wrong size of blockNo, got %d bytes, expected 2", (int) size);
 
     const char *p_keytype = luaL_checklstring(L, 2, &size);
-    if (size != 1)  return returnToLuaWithError(L, "Wrong size of keyType, got %d bytes, expected 1", (int) size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of keyType, got %d bytes, expected 1", (int) size);
 
     const char *p_key = luaL_checklstring(L, 3, &size);
-    if (size != 12)  return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 12", (int) size);
+    if (size != 12)
+        return returnToLuaWithError(L, "Wrong size of key, got %d bytes, expected 12", (int) size);
 
     const char *p_trg_blockno = luaL_checklstring(L, 4, &size);
-    if (size != 2)  return returnToLuaWithError(L, "Wrong size of trgBlockNo, got %d bytes, expected 2", (int) size);
+    if (size != 2)
+        return returnToLuaWithError(L, "Wrong size of trgBlockNo, got %d bytes, expected 2", (int) size);
 
     const char *p_trg_keytype = luaL_checklstring(L, 5, &size);
-    if (size != 1)  return returnToLuaWithError(L, "Wrong size of trgKeyType, got %d bytes, expected 1", (int) size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of trgKeyType, got %d bytes, expected 1", (int) size);
 
     const char *p_trgkey = luaL_checklstring(L, 6, &size);
     if (size != 12)
         haveTarget = false;
 
     const char *p_nonce_file_read = luaL_checklstring(L, 7, &size);
-    if (size != 1)  return returnToLuaWithError(L, "Wrong size of nonce_file_read, got %d bytes, expected 1", (int) size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of nonce_file_read, got %d bytes, expected 1", (int) size);
 
     const char *p_nonce_file_write = luaL_checklstring(L, 8, &size);
-    if (size != 1)  return returnToLuaWithError(L, "Wrong size of nonce_file_write, got %d bytes, expected 1", (int) size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of nonce_file_write, got %d bytes, expected 1", (int) size);
 
     const char *p_slow = luaL_checklstring(L, 9, &size);
-    if (size != 1)  return returnToLuaWithError(L, "Wrong size of slow, got %d bytes, expected 1", (int) size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of slow, got %d bytes, expected 1", (int) size);
 
     const char *p_tests = luaL_checklstring(L, 10, &size);
-    if (size != 1)  return returnToLuaWithError(L, "Wrong size of tests, got %d bytes, expected 1", (int) size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of tests, got %d bytes, expected 1", (int) size);
 
     char filename[FILE_PATH_SIZE] = "nonces.bin";
     const char *p_filename = luaL_checklstring(L, 11, &size);
@@ -627,7 +870,7 @@ static int l_hardnested(lua_State *L) {
 
     uint8_t key[6] = {0, 0, 0, 0, 0, 0};
     uint8_t trgkey[6] = {0, 0, 0, 0, 0, 0};
-    for (int i = 0; i < 32; i += 2) {
+    for (int i = 0; i < 12; i += 2) {
         sscanf(&p_key[i], "%02x", &tmp);
         key[i / 2] = tmp & 0xFF;
         if (haveTarget) {
@@ -670,7 +913,8 @@ static int l_keygen_algoD(lua_State *L) {
     size_t size;
     uint32_t tmp;
     const char *p_uid = luaL_checklstring(L, 1, &size);
-    if (size != 14) return returnToLuaWithError(L, "Wrong size of UID, got %d bytes, expected 14", (int) size);
+    if (size != 14)
+        return returnToLuaWithError(L, "Wrong size of UID, got %d bytes, expected 14", (int) size);
 
     uint8_t uid[7] = {0, 0, 0, 0, 0, 0, 0};
 
@@ -687,6 +931,227 @@ static int l_keygen_algoD(lua_State *L) {
     return 2;
 }
 
+/*
+Read T55Xx block.
+param1 uint8_t block
+param2 bool page1
+param3 bool override
+param4 uint32_t password
+*/
+static int l_T55xx_readblock(lua_State *L) {
+
+    //Check number of arguments
+    int n = lua_gettop(L);
+    if (n != 4)
+        return returnToLuaWithError(L, "Wrong number of arguments, got %d bytes, expected 4", n);
+
+    uint32_t block, usepage1, override, password;
+    bool usepwd;
+    size_t size;
+
+    const char *p_blockno = luaL_checklstring(L, 1, &size);
+    if (size < 1 || size > 2)
+        return returnToLuaWithError(L, "Wrong size of blockNo, got %d, expected 1 or 2", (int) size);
+
+    sscanf(p_blockno, "%x", &block);
+
+    const char *p_usepage1 = luaL_checklstring(L, 2, &size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of usePage1, got %d, expected 1", (int) size);
+
+    sscanf(p_usepage1, "%x", &usepage1);
+
+    const char *p_override = luaL_checklstring(L, 3, &size);
+    if (size != 1)
+        return returnToLuaWithError(L, "Wrong size of override, got %d, expected 1", (int) size);
+
+    sscanf(p_override, "%x", &override);
+
+    const char *p_pwd = luaL_checklstring(L, 4, &size);
+    if (size == 0) {
+        usepwd = false;
+    } else {
+
+        if (size != 8)
+            return returnToLuaWithError(L, "Wrong size of pwd, got %d , expected 8", (int) size);
+
+        sscanf(p_pwd, "%08x", &password);
+        usepwd = true;
+    }
+
+    //Password mode
+    if (usepwd) {
+        // try reading the config block and verify that PWD bit is set before doing this!
+        if (!override) {
+
+            if (!AcquireData(T55x7_PAGE0, T55x7_CONFIGURATION_BLOCK, false, 0, 0)) {
+                return returnToLuaWithError(L, "Failed to read config block");
+            }
+
+            if (!tryDetectModulation(0, true)) { // Default to prev. behaviour (default dl mode and print config)
+                PrintAndLogEx(NORMAL, "Safety Check: Could not detect if PWD bit is set in config block. Exits.");
+                return 0;
+            } else {
+                PrintAndLogEx(NORMAL, "Safety Check: PWD bit is NOT set in config block. Reading without password...");
+                usepwd = false;
+                usepage1 = false;
+            }
+        } else {
+            PrintAndLogEx(NORMAL, "Safety Check Overridden - proceeding despite risk");
+        }
+    }
+
+    if (!AcquireData(usepage1, block, usepwd, password, 0)) {
+        return returnToLuaWithError(L, "Failed to acquire data from card");
+    }
+
+    if (!DecodeT55xxBlock()) {
+        return returnToLuaWithError(L, "Failed to decode signal");
+    }
+
+    uint32_t blockData = 0;
+    if (GetT55xxBlockData(&blockData) == false) {
+        return returnToLuaWithError(L, "Failed to get actual data");
+    }
+
+    lua_pushunsigned(L, blockData);
+    return 1;
+}
+
+// arg 1 = pwd
+// arg 2 = use GB
+static int l_T55xx_detect(lua_State *L) {
+    bool useGB = false, usepwd = false, isok;
+    uint32_t gb, password = 0;
+    size_t size;
+
+    //Check number of arguments
+    int n = lua_gettop(L);
+
+    switch (n) {
+        case 2: {
+            const char *p_gb = luaL_checklstring(L, 2, &size);
+            if (size != 1)
+                return returnToLuaWithError(L, "Wrong size of useGB, got %d , expected 1", (int) size);
+
+            sscanf(p_gb, "%u", &gb);
+            useGB = (gb) ? true : false;
+            printf("p_gb size  %zu | %c \n", size, useGB ? 'Y' : 'N');
+        }
+        case 1: {
+            const char *p_pwd = luaL_checklstring(L, 1, &size);
+            if (size == 0) {
+                usepwd = false;
+            } else {
+
+                if (size != 8)
+                    return returnToLuaWithError(L, "Wrong size of pwd, got %d , expected 8", (int) size);
+
+                sscanf(p_pwd, "%08x", &password);
+                usepwd = true;
+            }
+            break;
+        }
+        default :
+            break;
+    }
+
+    if (!useGB) {
+
+        isok = AcquireData(T55x7_PAGE0, T55x7_CONFIGURATION_BLOCK, usepwd, password, 0);
+        if (isok == false) {
+            return returnToLuaWithError(L, "Failed to acquire LF signal data");
+        }
+    }
+
+    isok = tryDetectModulation(0, true); // Default to prev. behaviour (default dl mode and print config)
+    if (isok == false) {
+        return returnToLuaWithError(L, "Could not detect modulation automatically. Try setting it manually with \'lf t55xx config\'");
+    }
+
+    lua_pushinteger(L, isok);
+    lua_pushstring(L, "Success");
+    return 2;
+}
+
+//
+static int l_ndefparse(lua_State *L) {
+
+    size_t size;
+
+    //Check number of arguments
+    int n = lua_gettop(L);
+    if (n != 3)  {
+        return returnToLuaWithError(L, "You need to supply three parameters");
+    }
+
+    size_t datalen = luaL_checknumber(L, 1);
+    bool verbose = luaL_checknumber(L, 2);
+
+    uint8_t *data = calloc(datalen, sizeof(uint8_t));
+    if (data == 0) {
+        return returnToLuaWithError(L, "Allocating memory failed");
+    }
+
+    // data
+    const char *p_data = luaL_checklstring(L, 3, &size);
+    if (size) {
+        if (size > (datalen << 1))
+            size = (datalen << 1);
+
+        uint32_t tmp;
+        for (int i = 0; i < size; i += 2) {
+            sscanf(&p_data[i], "%02x", &tmp);
+            data[i >> 1] = tmp & 0xFF;
+        }
+    }
+
+    int res = NDEFDecodeAndPrint(data, datalen, verbose);
+    lua_pushinteger(L, res);
+    return 1;
+}
+
+static int l_remark(lua_State *L) {
+    //Check number of arguments
+    int n = lua_gettop(L);
+    if (n != 1)  {
+        return returnToLuaWithError(L, "Only one string allowed");
+    }
+
+    size_t size;
+    // data
+    const char *s = luaL_checklstring(L, 1, &size);
+
+    int res = CmdRem(s);
+    lua_pushinteger(L, res);
+    return 1;
+}
+
+static int l_searchfile(lua_State *L) {
+    //Check number of arguments
+    int n = lua_gettop(L);
+    if (n != 2)  {
+        return returnToLuaWithError(L, "Only filename and extension");
+    }
+
+    size_t size;
+    // data
+    const char *filename = luaL_checklstring(L, 1, &size);
+    if (size == 0)
+        return returnToLuaWithError(L, "Must specify filename");
+
+    const char *suffix =  luaL_checklstring(L, 2, &size);
+    char *path;
+    int res = searchFile(&path, "", filename, suffix, false);
+    if (res != PM3_SUCCESS) {
+        return returnToLuaWithError(L, "Failed to find file");
+    }
+
+    lua_pushstring(L, path);
+    free(path);
+    return 1;
+}
+
 /**
  * @brief Sets the lua path to include "./lualibs/?.lua", in order for a script to be
  * able to do "require('foobar')" if foobar.lua is within lualibs folder.
@@ -695,7 +1160,7 @@ static int l_keygen_algoD(lua_State *L) {
  * @param path
  * @return
  */
-int setLuaPath(lua_State *L, const char *path) {
+static int setLuaPath(lua_State *L, const char *path) {
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "path");   // get field "path" from table at top of stack (-1)
     const char *cur_path = lua_tostring(L, -1);   // grab path string from top of stack
@@ -712,13 +1177,16 @@ int setLuaPath(lua_State *L, const char *path) {
 
 int set_pm3_libraries(lua_State *L) {
     static const luaL_Reg libs[] = {
-        {"SendCommand",                 l_SendCommand},
+        {"SendCommandOLD",              l_SendCommandOLD},
+        {"SendCommandMIX",              l_SendCommandMIX},
+        {"SendCommandNG",               l_SendCommandNG},
         {"GetFromBigBuf",               l_GetFromBigBuf},
         {"GetFromFlashMem",             l_GetFromFlashMem},
+        {"GetFromFlashMemSpiffs",       l_GetFromFlashMemSpiffs},
         {"WaitForResponseTimeout",      l_WaitForResponseTimeout},
         {"mfDarkside",                  l_mfDarkside},
         {"foobar",                      l_foobar},
-        {"ukbhit",                      l_ukbhit},
+        {"kbd_enter_pressed",               l_kbd_enter_pressed},
         {"clearCommandBuffer",          l_clearCommandBuffer},
         {"console",                     l_CmdConsole},
         {"iso15693_crc",                l_iso15693_crc},
@@ -733,13 +1201,19 @@ int set_pm3_libraries(lua_State *L) {
         {"crc64_ecma182",               l_crc64_ecma182},
         {"sha1",                        l_sha1},
         {"reveng_models",               l_reveng_models},
-        {"reveng_runmodel",             l_reveng_RunModel},
+        {"reveng_runmodel",             l_reveng_runmodel},
         {"hardnested",                  l_hardnested},
         {"detect_prng",                 l_detect_prng},
 //        {"keygen.algoA",                l_keygen_algoA},
 //        {"keygen.algoB",                l_keygen_algoB},
 //        {"keygen.algoC",                l_keygen_algoC},
         {"keygen_algo_d",               l_keygen_algoD},
+        {"t55xx_readblock",             l_T55xx_readblock},
+        {"t55xx_detect",                l_T55xx_detect},
+        {"ndefparse",                   l_ndefparse},
+        {"fast_push_mode",              l_fast_push_mode},
+        {"search_file",                 l_searchfile},
+        {"rem",                         l_remark},
         {NULL, NULL}
     };
 
@@ -759,21 +1233,57 @@ int set_pm3_libraries(lua_State *L) {
     //-- remove the global environment table from the stack
     lua_pop(L, 1);
 
-
     //--add to the LUA_PATH (package.path in lua)
-    // so we can load scripts from the ./scripts/ - directory
-    char scripts_path[strlen(get_my_executable_directory()) + strlen(LUA_SCRIPTS_DIRECTORY) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
-    strcpy(scripts_path, get_my_executable_directory());
-    strcat(scripts_path, LUA_SCRIPTS_DIRECTORY);
-    strcat(scripts_path, LUA_LIBRARIES_WILDCARD);
-    setLuaPath(L, scripts_path);
+    // so we can load scripts from various places:
+    const char *exec_path = get_my_executable_directory();
+    if (exec_path != NULL) {
+        // from the ./luascripts/ directory
+        char scripts_path[strlen(exec_path) + strlen(LUA_SCRIPTS_SUBDIR) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
+        strcpy(scripts_path, exec_path);
+        strcat(scripts_path, LUA_SCRIPTS_SUBDIR);
+        strcat(scripts_path, LUA_LIBRARIES_WILDCARD);
+        setLuaPath(L, scripts_path);
+        // from the ./lualib/ directory
+        char libraries_path[strlen(exec_path) + strlen(LUA_LIBRARIES_SUBDIR) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
+        strcpy(libraries_path, exec_path);
+        strcat(libraries_path, LUA_LIBRARIES_SUBDIR);
+        strcat(libraries_path, LUA_LIBRARIES_WILDCARD);
+        setLuaPath(L, libraries_path);
+    }
+    const char *user_path = get_my_user_directory();
+    if (user_path != NULL) {
+        // from the $HOME/.proxmark3/luascripts/ directory
+        char scripts_path[strlen(user_path) + strlen(PM3_USER_DIRECTORY) + strlen(LUA_SCRIPTS_SUBDIR) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
+        strcpy(scripts_path, user_path);
+        strcat(scripts_path, PM3_USER_DIRECTORY);
+        strcat(scripts_path, LUA_SCRIPTS_SUBDIR);
+        strcat(scripts_path, LUA_LIBRARIES_WILDCARD);
+        setLuaPath(L, scripts_path);
 
-    //-- Last but not least, add to the LUA_PATH (package.path in lua)
-    // so we can load libraries from the ./lualib/ - directory
-    char libraries_path[strlen(get_my_executable_directory()) + strlen(LUA_LIBRARIES_DIRECTORY) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
-    strcpy(libraries_path, get_my_executable_directory());
-    strcat(libraries_path, LUA_LIBRARIES_DIRECTORY);
-    strcat(libraries_path, LUA_LIBRARIES_WILDCARD);
-    setLuaPath(L, libraries_path);
+        // from the $HOME/.proxmark3/lualib/ directory
+        char libraries_path[strlen(user_path) + strlen(PM3_USER_DIRECTORY) + strlen(LUA_LIBRARIES_SUBDIR) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
+        strcpy(libraries_path, user_path);
+        strcat(libraries_path, PM3_USER_DIRECTORY);
+        strcat(libraries_path, LUA_LIBRARIES_SUBDIR);
+        strcat(libraries_path, LUA_LIBRARIES_WILDCARD);
+        setLuaPath(L, libraries_path);
+    }
+
+    if (exec_path != NULL) {
+        // from the $PREFIX/share/proxmark3/luascripts/ directory
+        char scripts_path[strlen(exec_path) + strlen(PM3_SHARE_RELPATH) + strlen(LUA_SCRIPTS_SUBDIR) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
+        strcpy(scripts_path, exec_path);
+        strcat(scripts_path, PM3_SHARE_RELPATH);
+        strcat(scripts_path, LUA_SCRIPTS_SUBDIR);
+        strcat(scripts_path, LUA_LIBRARIES_WILDCARD);
+        setLuaPath(L, scripts_path);
+        // from the $PREFIX/share/proxmark3/lualib/ directory
+        char libraries_path[strlen(exec_path) + strlen(PM3_SHARE_RELPATH) + strlen(LUA_LIBRARIES_SUBDIR) + strlen(LUA_LIBRARIES_WILDCARD) + 1];
+        strcpy(libraries_path, exec_path);
+        strcat(libraries_path, PM3_SHARE_RELPATH);
+        strcat(libraries_path, LUA_LIBRARIES_SUBDIR);
+        strcat(libraries_path, LUA_LIBRARIES_WILDCARD);
+        setLuaPath(L, libraries_path);
+    }
     return 1;
 }

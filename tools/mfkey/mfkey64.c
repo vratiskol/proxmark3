@@ -1,9 +1,11 @@
 #define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
-#include <inttypes.h>
-#include "crapto1.h"
+#include <stdlib.h>
+#include "crapto1/crapto1.h"
+#include "util_posix.h"
 
 int main(int argc, char *argv[]) {
     struct Crypto1State *revstate;
@@ -36,7 +38,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < encc; i++) {
         enclen[i] = strlen(argv[i + 6]) / 2;
         for (int i2 = 0; i2 < enclen[i]; i2++) {
-            sscanf(argv[i + 6] + i2 * 2, "%2x", (unsigned int *)&enc[i][i2]);
+            sscanf(argv[i + 6] + i2 * 2, "%2hhx", &enc[i][i2]);
         }
     }
 
@@ -58,13 +60,14 @@ int main(int argc, char *argv[]) {
 
     // Generate lfsr succesors of the tag challenge
     printf("\nLFSR succesors of the tag challenge:\n");
-    printf("  nt': %08x\n", prng_successor(nt, 64));
-    printf(" nt'': %08x\n", prng_successor(nt, 96));
+    uint32_t p64 = prng_successor(nt, 64);
+    printf("  nt': %08x\n", p64);
+    printf(" nt'': %08x\n", prng_successor(p64, 32));
 
     // Extract the keystream from the messages
     printf("\nKeystream used to generate {ar} and {at}:\n");
-    ks2 = ar_enc ^ prng_successor(nt, 64);
-    ks3 = at_enc ^ prng_successor(nt, 96);
+    ks2 = ar_enc ^ p64;
+    ks3 = at_enc ^ prng_successor(p64, 32);
     printf("  ks2: %08x\n", ks2);
     printf("  ks3: %08x\n", ks3);
 

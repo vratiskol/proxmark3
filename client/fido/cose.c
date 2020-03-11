@@ -11,23 +11,25 @@
 //
 
 #include "cose.h"
-#include <cbor.h>
+
 #include "cbortools.h"
+#include "commonutil.h"  // ARRAYLEN
+#include "ui.h" // Print...
 #include "util.h"
 
 static const char COSEEmptyStr[] = "";
 
 typedef struct {
     int Value;
-    char *Name;
-    char *Description;
+    const char *Name;
+    const char *Description;
 } COSEValueNameDesc_t;
 
 typedef struct {
     int Value;
-    char *Type;
-    char *Name;
-    char *Description;
+    const char *Type;
+    const char *Name;
+    const char *Description;
 } COSEValueTypeNameDesc_t;
 
 // kty - Key Type Values
@@ -38,8 +40,8 @@ COSEValueNameDesc_t COSEKeyTypeValueDesc[] = {
     {4, "Symmetric", "Symmetric Key"},
 };
 
-COSEValueNameDesc_t *GetCOSEktyElm(int id) {
-    for (int i = 0; i < ARRAYLEN(COSEKeyTypeValueDesc); i++)
+static COSEValueNameDesc_t *GetCOSEktyElm(int id) {
+    for (size_t i = 0; i < ARRAYLEN(COSEKeyTypeValueDesc); i++)
         if (COSEKeyTypeValueDesc[i].Value == id)
             return &COSEKeyTypeValueDesc[i];
     return NULL;
@@ -63,8 +65,8 @@ COSEValueTypeNameDesc_t COSECurvesDesc[] = {
     {7, "OKP", "Ed448",    "Ed448 for use w/ EdDSA only"},
 };
 
-COSEValueTypeNameDesc_t *GetCOSECurveElm(int id) {
-    for (int i = 0; i < ARRAYLEN(COSECurvesDesc); i++)
+static COSEValueTypeNameDesc_t *GetCOSECurveElm(int id) {
+    for (size_t i = 0; i < ARRAYLEN(COSECurvesDesc); i++)
         if (COSECurvesDesc[i].Value == id)
             return &COSECurvesDesc[i];
     return NULL;
@@ -79,39 +81,39 @@ const char *GetCOSECurveDescription(int id) {
 
 // RFC8152 https://www.iana.org/assignments/cose/cose.xhtml#algorithms
 COSEValueNameDesc_t COSEAlg[] = {
-    {-65536,    "Unassigned",               "Unassigned"},
-    {-65535,    "RS1",                      "RSASSA-PKCS1-v1_5 w/ SHA-1"},
-    {-259,      "RS512",                    "RSASSA-PKCS1-v1_5 w/ SHA-512"},
-    {-258,      "RS384",                    "RSASSA-PKCS1-v1_5 w/ SHA-384"},
-    {-257,      "RS256",                    "RSASSA-PKCS1-v1_5 w/ SHA-256"},
-    {-42,       "RSAES-OAEP w/ SHA-512",    "RSAES-OAEP w/ SHA-512"},
-    {-41,       "RSAES-OAEP w/ SHA-256",    "RSAES-OAEP w/ SHA-256"},
-    {-40,       "RSAES-OAEP w/ RFC 8017 def param",    "RSAES-OAEP w/ SHA-1"},
-    {-39,       "PS512",                    "RSASSA-PSS w/ SHA-512"},
-    {-38,       "PS384",                    "RSASSA-PSS w/ SHA-384"},
-    {-37,       "PS256",                    "RSASSA-PSS w/ SHA-256"},
-    {-36,       "ES512",                    "ECDSA w/ SHA-512"},
-    {-35,       "ES384",                    "ECDSA w/ SHA-384"},
-    {-34,       "ECDH-SS + A256KW",         "ECDH SS w/ Concat KDF and AES Key Wrap w/ 256-bit key"},
-    {-33,       "ECDH-SS + A192KW",         "ECDH SS w/ Concat KDF and AES Key Wrap w/ 192-bit key"},
-    {-32,       "ECDH-SS + A128KW",         "ECDH SS w/ Concat KDF and AES Key Wrap w/ 128-bit key"},
-    {-31,       "ECDH-ES + A256KW",         "ECDH ES w/ Concat KDF and AES Key Wrap w/ 256-bit key"},
-    {-30,       "ECDH-ES + A192KW",         "ECDH ES w/ Concat KDF and AES Key Wrap w/ 192-bit key"},
-    {-29,       "ECDH-ES + A128KW",         "ECDH ES w/ Concat KDF and AES Key Wrap w/ 128-bit key"},
-    {-28,       "ECDH-SS + HKDF-512",       "ECDH SS w/ HKDF - generate key directly"},
-    {-27,       "ECDH-SS + HKDF-256",       "ECDH SS w/ HKDF - generate key directly"},
-    {-26,       "ECDH-ES + HKDF-512",       "ECDH ES w/ HKDF - generate key directly"},
-    {-25,       "ECDH-ES + HKDF-256",       "ECDH ES w/ HKDF - generate key directly"},
-    {-13,       "direct+HKDF-AES-256",      "Shared secret w/ AES-MAC 256-bit key"},
-    {-12,       "direct+HKDF-AES-128",      "Shared secret w/ AES-MAC 128-bit key"},
-    {-11,       "direct+HKDF-SHA-512",      "Shared secret w/ HKDF and SHA-512"},
-    {-10,       "direct+HKDF-SHA-256",      "Shared secret w/ HKDF and SHA-256"},
-    {-8,        "EdDSA",                    "EdDSA"},
-    {-7,        "ES256",                    "ECDSA w/ SHA-256"},
-    {-6,        "direct",                   "Direct use of CEK"},
-    {-5,        "A256KW",                   "AES Key Wrap w/ 256-bit key"},
-    {-4,        "A192KW",                   "AES Key Wrap w/ 192-bit key"},
-    {-3,        "A128KW",                   "AES Key Wrap w/ 128-bit key"},
+    { -65536,    "Unassigned",               "Unassigned"},
+    { -65535,    "RS1",                      "RSASSA-PKCS1-v1_5 w/ SHA-1"},
+    { -259,      "RS512",                    "RSASSA-PKCS1-v1_5 w/ SHA-512"},
+    { -258,      "RS384",                    "RSASSA-PKCS1-v1_5 w/ SHA-384"},
+    { -257,      "RS256",                    "RSASSA-PKCS1-v1_5 w/ SHA-256"},
+    { -42,       "RSAES-OAEP w/ SHA-512",    "RSAES-OAEP w/ SHA-512"},
+    { -41,       "RSAES-OAEP w/ SHA-256",    "RSAES-OAEP w/ SHA-256"},
+    { -40,       "RSAES-OAEP w/ RFC 8017 def param",    "RSAES-OAEP w/ SHA-1"},
+    { -39,       "PS512",                    "RSASSA-PSS w/ SHA-512"},
+    { -38,       "PS384",                    "RSASSA-PSS w/ SHA-384"},
+    { -37,       "PS256",                    "RSASSA-PSS w/ SHA-256"},
+    { -36,       "ES512",                    "ECDSA w/ SHA-512"},
+    { -35,       "ES384",                    "ECDSA w/ SHA-384"},
+    { -34,       "ECDH-SS + A256KW",         "ECDH SS w/ Concat KDF and AES Key Wrap w/ 256-bit key"},
+    { -33,       "ECDH-SS + A192KW",         "ECDH SS w/ Concat KDF and AES Key Wrap w/ 192-bit key"},
+    { -32,       "ECDH-SS + A128KW",         "ECDH SS w/ Concat KDF and AES Key Wrap w/ 128-bit key"},
+    { -31,       "ECDH-ES + A256KW",         "ECDH ES w/ Concat KDF and AES Key Wrap w/ 256-bit key"},
+    { -30,       "ECDH-ES + A192KW",         "ECDH ES w/ Concat KDF and AES Key Wrap w/ 192-bit key"},
+    { -29,       "ECDH-ES + A128KW",         "ECDH ES w/ Concat KDF and AES Key Wrap w/ 128-bit key"},
+    { -28,       "ECDH-SS + HKDF-512",       "ECDH SS w/ HKDF - generate key directly"},
+    { -27,       "ECDH-SS + HKDF-256",       "ECDH SS w/ HKDF - generate key directly"},
+    { -26,       "ECDH-ES + HKDF-512",       "ECDH ES w/ HKDF - generate key directly"},
+    { -25,       "ECDH-ES + HKDF-256",       "ECDH ES w/ HKDF - generate key directly"},
+    { -13,       "direct+HKDF-AES-256",      "Shared secret w/ AES-MAC 256-bit key"},
+    { -12,       "direct+HKDF-AES-128",      "Shared secret w/ AES-MAC 128-bit key"},
+    { -11,       "direct+HKDF-SHA-512",      "Shared secret w/ HKDF and SHA-512"},
+    { -10,       "direct+HKDF-SHA-256",      "Shared secret w/ HKDF and SHA-256"},
+    { -8,        "EdDSA",                    "EdDSA"},
+    { -7,        "ES256",                    "ECDSA w/ SHA-256"},
+    { -6,        "direct",                   "Direct use of CEK"},
+    { -5,        "A256KW",                   "AES Key Wrap w/ 256-bit key"},
+    { -4,        "A192KW",                   "AES Key Wrap w/ 192-bit key"},
+    { -3,        "A128KW",                   "AES Key Wrap w/ 128-bit key"},
     {0,         "Reserved",                 "Reserved"},
     {1,         "A128GCM",                  "AES-GCM mode w/ 128-bit key, 128-bit tag"},
     {2,         "A192GCM",                  "AES-GCM mode w/ 192-bit key, 128-bit tag"},
@@ -135,8 +137,8 @@ COSEValueNameDesc_t COSEAlg[] = {
     {33,        "AES-CCM-64-128-256",       "AES-CCM mode 256-bit key, 128-bit tag, 7-byte nonce"}
 };
 
-COSEValueNameDesc_t *GetCOSEAlgElm(int id) {
-    for (int i = 0; i < ARRAYLEN(COSEAlg); i++)
+static COSEValueNameDesc_t *GetCOSEAlgElm(int id) {
+    for (size_t i = 0; i < ARRAYLEN(COSEAlg); i++)
         if (COSEAlg[i].Value == id)
             return &COSEAlg[i];
     return NULL;
@@ -163,16 +165,16 @@ int COSEGetECDSAKey(uint8_t *data, size_t datalen, bool verbose, uint8_t *public
     size_t len;
 
     if (verbose)
-        PrintAndLog("----------- CBOR decode ----------------");
+        PrintAndLogEx(NORMAL, "----------- CBOR decode ----------------");
 
     // kty
     int res = CborMapGetKeyById(&parser, &map, data, datalen, 1);
     if (!res) {
         cbor_value_get_int64(&map, &i64);
         if (verbose)
-            PrintAndLog("kty [%lld] %s", (long long)i64, GetCOSEktyDescription(i64));
+            PrintAndLogEx(SUCCESS, "kty [%lld] %s", (long long)i64, GetCOSEktyDescription(i64));
         if (i64 != 2)
-            PrintAndLog("ERROR: kty must be 2.");
+            PrintAndLogEx(ERR, "ERROR: kty must be 2.");
     }
 
     // algorithm
@@ -180,9 +182,9 @@ int COSEGetECDSAKey(uint8_t *data, size_t datalen, bool verbose, uint8_t *public
     if (!res) {
         cbor_value_get_int64(&map, &i64);
         if (verbose)
-            PrintAndLog("algorithm [%lld] %s", (long long)i64, GetCOSEAlgDescription(i64));
+            PrintAndLogEx(SUCCESS, "algorithm [%lld] %s", (long long)i64, GetCOSEAlgDescription(i64));
         if (i64 != -7)
-            PrintAndLog("ERROR: algorithm must be -7.");
+            PrintAndLogEx(ERR, "ERROR: algorithm must be -7.");
     }
 
     // curve
@@ -190,9 +192,9 @@ int COSEGetECDSAKey(uint8_t *data, size_t datalen, bool verbose, uint8_t *public
     if (!res) {
         cbor_value_get_int64(&map, &i64);
         if (verbose)
-            PrintAndLog("curve [%lld] %s", (long long)i64, GetCOSECurveDescription(i64));
+            PrintAndLogEx(SUCCESS, "curve [%lld] %s", (long long)i64, GetCOSECurveDescription(i64));
         if (i64 != 1)
-            PrintAndLog("ERROR: curve must be 1.");
+            PrintAndLogEx(ERR, "ERROR: curve must be 1.");
     }
 
     // plain key
@@ -204,9 +206,9 @@ int COSEGetECDSAKey(uint8_t *data, size_t datalen, bool verbose, uint8_t *public
         res = CborGetBinStringValue(&map, &public_key[1], 32, &len);
         cbor_check(res);
         if (verbose)
-            PrintAndLog("x - coordinate [%d]: %s", len, sprint_hex(&public_key[1], 32));
+            PrintAndLogEx(SUCCESS, "x - coordinate [%zu]: %s", len, sprint_hex(&public_key[1], 32));
         if (len != 32)
-            PrintAndLog("ERROR: x - coordinate length must be 32.");
+            PrintAndLogEx(ERR, "ERROR: x - coordinate length must be 32.");
     }
 
     // y - coordinate
@@ -215,23 +217,23 @@ int COSEGetECDSAKey(uint8_t *data, size_t datalen, bool verbose, uint8_t *public
         res = CborGetBinStringValue(&map, &public_key[33], 32, &len);
         cbor_check(res);
         if (verbose)
-            PrintAndLog("y - coordinate [%d]: %s", len, sprint_hex(&public_key[33], 32));
+            PrintAndLogEx(SUCCESS, "y - coordinate [%zu]: %s", len, sprint_hex(&public_key[33], 32));
         if (len != 32)
-            PrintAndLog("ERROR: y - coordinate length must be 32.");
+            PrintAndLogEx(ERR, "ERROR: y - coordinate length must be 32.");
     }
 
     // d - private key
-    uint8_t private_key[128] = {0};
     res = CborMapGetKeyById(&parser, &map, data, datalen, -4);
     if (!res) {
+        uint8_t private_key[128] = {0};
         res = CborGetBinStringValue(&map, private_key, sizeof(private_key), &len);
         cbor_check(res);
         if (verbose)
-            PrintAndLog("d - private key [%d]: %s", len, sprint_hex(private_key, len));
+            PrintAndLogEx(SUCCESS, "d - private key [%zu]: %s", len, sprint_hex(private_key, len));
     }
 
     if (verbose)
-        PrintAndLog("----------- CBOR decode ----------------");
+        PrintAndLogEx(NORMAL, "----------- CBOR decode ----------------");
 
     return 0;
 }

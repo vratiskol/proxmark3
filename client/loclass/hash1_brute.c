@@ -1,3 +1,4 @@
+#include "hash1_brute.h"
 #include <stdio.h>
 #include "cipherutils.h"
 #include <stdint.h>
@@ -7,7 +8,8 @@
 #include <ctype.h>
 #include "elite_crack.h"
 
-void calc_score(uint8_t *csn, uint8_t *k) {
+
+static void calc_score(uint8_t *csn, uint8_t *k) {
     uint8_t score = 0 ;
     uint8_t i;
     uint8_t goodvals[16] = {0};

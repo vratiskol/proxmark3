@@ -12,6 +12,9 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <mbedtls/asn1.h>
+
+#include "ui.h"  // Print...
+
 #include "emv/tlv.h"
 #include "emv/dump.h"
 #include "asn1dump.h"
@@ -71,10 +74,9 @@ static bool print_cb(void *data, const struct tlv *tlv, int level, bool is_leaf)
     return true;
 }
 
-int asn1_print(uint8_t *asn1buf, size_t asn1buflen, char *indent) {
+int asn1_print(uint8_t *asn1buf, size_t asn1buflen, const char *indent) {
 
-    struct tlvdb *t = NULL;
-    t = tlvdb_parse_multi(asn1buf, asn1buflen);
+    struct tlvdb *t = tlvdb_parse_multi(asn1buf, asn1buflen);
     if (t) {
         tlvdb_visit(t, print_cb, NULL, 0);
         tlvdb_free(t);

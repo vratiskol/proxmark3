@@ -11,6 +11,15 @@
 //-----------------------------------------------------------------------------
 #include "fpgaloader.h"
 
+#include "proxmark3_arm.h"
+#include "appmain.h"
+#include "BigBuf.h"
+#include "ticks.h"
+#include "dbprint.h"
+#include "util.h"
+#include "zlib.h"
+#include "fpga.h"
+#include "string.h"
 
 // remember which version of the bitstream we have already downloaded to the FPGA
 static int downloaded_bitstream = 0;
@@ -81,7 +90,7 @@ void SetupSpi(int mode) {
             AT91C_BASE_SPI->SPI_CSR[0] =
                 (1 << 24)          |  // Delay between Consecutive Transfers (32 MCK periods)
                 (1 << 16)          |  // Delay Before SPCK (1 MCK period)
-                (6 << 8)           |  // Serial Clock Baud Rate (baudrate = MCK/6 = 24Mhz/6 = 4M baud
+                (6 << 8)           |  // Serial Clock Baud Rate (baudrate = MCK/6 = 24MHz/6 = 4M baud
                 AT91C_SPI_BITS_16   | // Bits per Transfer (16 bits)
                 (0 << 3)           |  // Chip Select inactive after transfer
                 AT91C_SPI_NCPHA     | // Clock Phase data captured on leading edge, changes on following edge
@@ -101,7 +110,7 @@ void SetupSpi(int mode) {
                     AT91C_BASE_SPI->SPI_CSR[2] =
                         ( 1 << 24)          | // Delay between Consecutive Transfers (32 MCK periods)
                         ( 1 << 16)          | // Delay Before SPCK (1 MCK period)
-                        ( 6 << 8)           | // Serial Clock Baud Rate (baudrate = MCK/6 = 24Mhz/6 = 4M baud
+                        ( 6 << 8)           | // Serial Clock Baud Rate (baudrate = MCK/6 = 24MHz/6 = 4M baud
                         AT91C_SPI_BITS_9    | // Bits per Transfer (9 bits)
                         ( 0 << 3)           | // Chip Select inactive after transfer
                         ( 1 << 1)           | // Clock Phase data captured on leading edge, changes on following edge
@@ -115,8 +124,8 @@ void SetupSpi(int mode) {
 }
 
 //-----------------------------------------------------------------------------
-// Set up the synchronous serial port, with the one set of options that we
-// always use when we are talking to the FPGA. Both RX and TX are enabled.
+// Set up the synchronous serial port with the set of options that fits
+// the FPGA mode. Both RX and TX are always enabled.
 //-----------------------------------------------------------------------------
 void FpgaSetupSsc(void) {
     // First configure the GPIOs, and get ourselves a clock.
@@ -132,16 +141,16 @@ void FpgaSetupSsc(void) {
     // Now set up the SSC proper, starting from a known state.
     AT91C_BASE_SSC->SSC_CR = AT91C_SSC_SWRST;
 
-    // RX clock comes from TX clock, RX starts when TX starts, data changes
-    // on RX clock rising edge, sampled on falling edge
+    // RX clock comes from TX clock, RX starts on Transmit Start,
+    // data and frame signal is sampled on falling edge of RK
     AT91C_BASE_SSC->SSC_RCMR = SSC_CLOCK_MODE_SELECT(1) | SSC_CLOCK_MODE_START(1);
 
     // 8 bits per transfer, no loopback, MSB first, 1 transfer per sync
     // pulse, no output sync
     AT91C_BASE_SSC->SSC_RFMR = SSC_FRAME_MODE_BITS_IN_WORD(8) | AT91C_SSC_MSBF | SSC_FRAME_MODE_WORDS_PER_TRANSFER(0);
 
-    // clock comes from TK pin, no clock output, outputs change on falling
-    // edge of TK, sample on rising edge of TK, start on positive-going edge of sync
+    // TX clock comes from TK pin, no clock output, outputs change on falling
+    // edge of TK, frame sync is sampled on rising edge of TK, start TX on rising edge of TF
     AT91C_BASE_SSC->SSC_TCMR = SSC_CLOCK_MODE_SELECT(2) | SSC_CLOCK_MODE_START(5);
 
     // tx framing is the same as the rx framing
@@ -153,8 +162,7 @@ void FpgaSetupSsc(void) {
 //-----------------------------------------------------------------------------
 // Set up DMA to receive samples from the FPGA. We will use the PDC, with
 // a single buffer as a circular buffer (so that we just chain back to
-// ourselves, not to another buffer). The stuff to manipulate those buffers
-// is in apps.h, because it should be inlined, for speed.
+// ourselves, not to another buffer).
 //-----------------------------------------------------------------------------
 bool FpgaSetupSscDma(uint8_t *buf, int len) {
     if (buf == NULL) return false;
@@ -229,7 +237,9 @@ static bool reset_fpga_stream(int bitstream_version, z_streamp compressed_fpga_s
     compressed_fpga_stream->zalloc = &fpga_inflate_malloc;
     compressed_fpga_stream->zfree = &fpga_inflate_free;
 
-    inflateInit2(compressed_fpga_stream, 0);
+    int res = inflateInit2(compressed_fpga_stream, 0);
+    if (res < 0)
+        return false;
 
     fpga_image_ptr = output_buffer;
 
@@ -390,13 +400,17 @@ static int bitparse_find_section(int bitstream_version, char section_name, uint3
 void FpgaDownloadAndGo(int bitstream_version) {
 
     // check whether or not the bitstream is already loaded
-    if (downloaded_bitstream == bitstream_version)
+    if (downloaded_bitstream == bitstream_version) {
+        FpgaEnableTracing();
         return;
+    }
 
+    // Send waiting time extension request as this will take a while
+    send_wtx(1500);
     z_stream compressed_fpga_stream;
     uint8_t output_buffer[OUTPUT_BUFFER_LEN] = {0x00};
 
-    bool verbose = (MF_DBGLEVEL > 3);
+    bool verbose = (DBGLEVEL > 3);
 
     // make sure that we have enough memory to decompress
     BigBuf_free();
@@ -425,6 +439,8 @@ void FpgaDownloadAndGo(int bitstream_version) {
 // Send a 16 bit command/data pair to the FPGA.
 // The bit format is:  C3 C2 C1 C0 D11 D10 D9 D8 D7 D6 D5 D4 D3 D2 D1 D0
 // where C is the 4 bit command and D is the 12 bit data
+//
+// @params cmd and v  gets or over eachother.  Take careful note of overlapping bits.
 //-----------------------------------------------------------------------------
 void FpgaSendCommand(uint16_t cmd, uint16_t v) {
     SetupSpi(SPI_FPGA_MODE);
@@ -437,8 +453,19 @@ void FpgaSendCommand(uint16_t cmd, uint16_t v) {
 // vs. clone vs. etc.). This is now a special case of FpgaSendCommand() to
 // avoid changing this function's occurence everywhere in the source code.
 //-----------------------------------------------------------------------------
-void FpgaWriteConfWord(uint8_t v) {
+void FpgaWriteConfWord(uint16_t v) {
     FpgaSendCommand(FPGA_CMD_SET_CONFREG, v);
+}
+
+//-----------------------------------------------------------------------------
+// enable/disable FPGA internal tracing
+//-----------------------------------------------------------------------------
+void FpgaEnableTracing(void) {
+    FpgaSendCommand(FPGA_CMD_TRACE_ENABLE, 1);
+}
+
+void FpgaDisableTracing(void) {
+    FpgaSendCommand(FPGA_CMD_TRACE_ENABLE, 0);
 }
 
 //-----------------------------------------------------------------------------
@@ -447,6 +474,9 @@ void FpgaWriteConfWord(uint8_t v) {
 // the samples from the ADC always flow through the FPGA.
 //-----------------------------------------------------------------------------
 void SetAdcMuxFor(uint32_t whichGpio) {
+
+#ifndef WITH_FPC_USART
+    // When compiled without FPC USART support
     AT91C_BASE_PIOA->PIO_OER =
         GPIO_MUXSEL_HIPKD |
         GPIO_MUXSEL_LOPKD |
@@ -461,16 +491,24 @@ void SetAdcMuxFor(uint32_t whichGpio) {
 
     LOW(GPIO_MUXSEL_HIPKD);
     LOW(GPIO_MUXSEL_LOPKD);
-#ifndef WITH_FPC
     LOW(GPIO_MUXSEL_HIRAW);
     LOW(GPIO_MUXSEL_LORAW);
+    HIGH(whichGpio);
+#else
+    if ((whichGpio == GPIO_MUXSEL_LORAW) || (whichGpio == GPIO_MUXSEL_HIRAW))
+        return;
+    // FPC USART uses HIRAW/LOWRAW pins, so they are excluded here.
+    AT91C_BASE_PIOA->PIO_OER = GPIO_MUXSEL_HIPKD | GPIO_MUXSEL_LOPKD;
+    AT91C_BASE_PIOA->PIO_PER = GPIO_MUXSEL_HIPKD | GPIO_MUXSEL_LOPKD;
+    LOW(GPIO_MUXSEL_HIPKD);
+    LOW(GPIO_MUXSEL_LOPKD);
+    HIGH(whichGpio);
 #endif
 
-    HIGH(whichGpio);
 }
 
 void Fpga_print_status(void) {
-    Dbprintf("Currently loaded FPGA image");
+    DbpString(_BLUE_("Currently loaded FPGA image"));
     Dbprintf("  mode....................%s", fpga_version_information[downloaded_bitstream - 1]);
 }
 
@@ -483,7 +521,7 @@ int FpgaGetCurrent(void) {
 // if HF,  Disable SSC DMA
 // turn off trace and leds off.
 void switch_off(void) {
-    if (MF_DBGLEVEL > 3) Dbprintf("switch_off");
+    if (DBGLEVEL > 3) Dbprintf("switch_off");
     FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);
     if (downloaded_bitstream == FPGA_BITSTREAM_HF)
         FpgaDisableSscDma();

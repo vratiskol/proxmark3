@@ -9,66 +9,79 @@
 //-----------------------------------------------------------------------------
 #include "cmdtrace.h"
 
+#include <ctype.h>
+
+#include "cmdparser.h"    // command_t
+#include "protocols.h"
+#include "parity.h"             // oddparity
+#include "cmdhflist.h"          // annotations
+#include "comms.h"              // for sending cmds to device. GetFromBigBuf
+#include "fileutils.h"          // for saveFile
+#include "cmdlfhitag.h"         // annotate hitag
+
 static int CmdHelp(const char *Cmd);
 
 // trace pointer
 static uint8_t *trace;
 long traceLen = 0;
 
-int usage_trace_list() {
+static int usage_trace_list() {
     PrintAndLogEx(NORMAL, "List protocol data in trace buffer.");
     PrintAndLogEx(NORMAL, "Usage:  trace list <protocol> [f][c| <0|1>");
     PrintAndLogEx(NORMAL, "    f      - show frame delay times as well");
     PrintAndLogEx(NORMAL, "    c      - mark CRC bytes");
+    PrintAndLogEx(NORMAL, "    x      - show hexdump to convert to pcap(ng) or to import into Wireshark using encapsulation type \"ISO 14443\"");
+    PrintAndLogEx(NORMAL, "             syntax to use: `text2pcap -t \"%%S.\" -l 264 -n <input-text-file> <output-pcapng-file>`");
     PrintAndLogEx(NORMAL, "    <0|1>  - use data from Tracebuffer, if not set, try reading data from tag.");
     PrintAndLogEx(NORMAL, "Supported <protocol> values:");
-    PrintAndLogEx(NORMAL, "    raw    - just show raw data without annotations");
-    PrintAndLogEx(NORMAL, "    14a    - interpret data as iso14443a communications");
-    PrintAndLogEx(NORMAL, "    mf     - interpret data as iso14443a communications and decrypt crypto1 stream");
-    PrintAndLogEx(NORMAL, "    14b    - interpret data as iso14443b communications");
-    PrintAndLogEx(NORMAL, "    15     - interpret data as iso15693 communications");
-    PrintAndLogEx(NORMAL, "    des    - interpret data as DESFire communications");
-#ifdef WITH_EMV
-    PrintAndLogEx(NORMAL, "    emv    - interpret data as EMV / communications");
-#endif
-    PrintAndLogEx(NORMAL, "    iclass - interpret data as iclass communications");
-    PrintAndLogEx(NORMAL, "    topaz  - interpret data as topaz communications");
-    PrintAndLogEx(NORMAL, "    7816   - interpret data as iso7816-4 communications");
-    PrintAndLogEx(NORMAL, "    legic  - interpret data as LEGIC communications");
-    PrintAndLogEx(NORMAL, "    felica - interpret data as ISO18092 / FeliCa communications");
-    PrintAndLogEx(NORMAL, "    hitag  - interpret data as Hitag2 / HitagS communications");
+    PrintAndLogEx(NORMAL, "    raw      - just show raw data without annotations");
+    PrintAndLogEx(NORMAL, "    14a      - interpret data as iso14443a communications");
+    PrintAndLogEx(NORMAL, "    thinfilm - interpret data as Thinfilm communications");
+    PrintAndLogEx(NORMAL, "    topaz    - interpret data as Topaz communications");
+    PrintAndLogEx(NORMAL, "    mf       - interpret data as iso14443a communications and decrypt crypto1 stream");
+    PrintAndLogEx(NORMAL, "    des      - interpret data as DESFire communications");
+    PrintAndLogEx(NORMAL, "    14b      - interpret data as iso14443b communications");
+    PrintAndLogEx(NORMAL, "    7816     - interpret data as iso7816-4 communications");
+    PrintAndLogEx(NORMAL, "    15       - interpret data as iso15693 communications");
+    PrintAndLogEx(NORMAL, "    iclass   - interpret data as iclass communications");
+    PrintAndLogEx(NORMAL, "    legic    - interpret data as LEGIC communications");
+    PrintAndLogEx(NORMAL, "    felica   - interpret data as ISO18092 / FeliCa communications");
+    PrintAndLogEx(NORMAL, "    hitag1   - interpret data as Hitag1 communications");
+    PrintAndLogEx(NORMAL, "    hitag2   - interpret data as Hitag2 communications");
+    PrintAndLogEx(NORMAL, "    hitags   - interpret data as HitagS communications");
+    PrintAndLogEx(NORMAL, "    lto      - interpret data as LTO-CM communications");
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "        trace list 14a f");
     PrintAndLogEx(NORMAL, "        trace list iclass");
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_trace_load() {
+static int usage_trace_load() {
     PrintAndLogEx(NORMAL, "Load protocol data from file to trace buffer.");
     PrintAndLogEx(NORMAL, "Usage:  trace load <filename>");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "        trace load mytracefile.bin");
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_trace_save() {
+static int usage_trace_save() {
     PrintAndLogEx(NORMAL, "Save protocol data from trace buffer to file.");
     PrintAndLogEx(NORMAL, "Usage:  trace save <filename>");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "        trace save mytracefile.bin");
-    return 0;
+    return PM3_SUCCESS;
 }
 
-bool is_last_record(uint16_t tracepos, uint8_t *trace, uint16_t traceLen) {
+static bool is_last_record(uint16_t tracepos, uint8_t *trace, uint16_t traceLen) {
     return (tracepos + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) >= traceLen);
 }
 
-bool next_record_is_response(uint16_t tracepos, uint8_t *trace) {
+static bool next_record_is_response(uint16_t tracepos, uint8_t *trace) {
     uint16_t next_records_datalen = *((uint16_t *)(trace + tracepos + sizeof(uint32_t) + sizeof(uint16_t)));
-    return (next_records_datalen & 0x8000);
+    return ((next_records_datalen & 0x8000) == 0x8000);
 }
 
-bool merge_topaz_reader_frames(uint32_t timestamp, uint32_t *duration, uint16_t *tracepos, uint16_t traceLen,
-                               uint8_t *trace, uint8_t *frame, uint8_t *topaz_reader_command, uint16_t *data_len) {
+static bool merge_topaz_reader_frames(uint32_t timestamp, uint32_t *duration, uint16_t *tracepos, uint16_t traceLen,
+                                      uint8_t *trace, uint8_t *frame, uint8_t *topaz_reader_command, uint16_t *data_len) {
 
 #define MAX_TOPAZ_READER_CMD_LEN 16
 
@@ -105,7 +118,92 @@ bool merge_topaz_reader_frames(uint32_t timestamp, uint32_t *duration, uint16_t 
     return true;
 }
 
-uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, uint8_t protocol, bool showWaitCycles, bool markCRCBytes) {
+static uint16_t printHexLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, uint8_t protocol) {
+    // sanity check
+    if (tracepos + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) > traceLen) return traceLen;
+
+    bool isResponse;
+    uint16_t data_len, parity_len;
+    uint32_t timestamp;
+
+    timestamp = *((uint32_t *)(trace + tracepos));
+    tracepos += 4;
+
+
+    // currently we don't use duration, so we skip it
+    tracepos += 2;
+
+    data_len = *((uint16_t *)(trace + tracepos));
+    tracepos += 2;
+
+    if (data_len & 0x8000) {
+        data_len &= 0x7fff;
+        isResponse = true;
+    } else {
+        isResponse = false;
+    }
+    parity_len = (data_len - 1) / 8 + 1;
+
+    if (tracepos + data_len + parity_len > traceLen) {
+        return traceLen;
+    }
+    uint8_t *frame = trace + tracepos;
+    tracepos += data_len;
+    //currently we don't use parity bytes, so we skip it
+    tracepos += parity_len;
+
+    if (data_len == 0) {
+        PrintAndLogEx(NORMAL, "<empty trace - possible error>");
+        return tracepos;
+    }
+
+    uint16_t ret;
+
+    switch (protocol) {
+        case ISO_14443A: {
+            /* https://www.kaiser.cx/pcap-iso14443.html defines a pseudo header:
+             * version (currently 0x00), event (Rdr: 0xfe, Tag: 0xff), length (2 bytes)
+             * to convert to pcap(ng) via text2pcap or to import into Wireshark
+             * we use format timestamp, newline, offset (0x000000), pseudo header, data
+             * `text2pcap -t "%S." -l 264 -n <input-text-file> <output-pcapng-file>`
+             */
+            char line[(data_len * 3) + 1];
+            char *ptr = &line[0];
+
+            for (int j = 0; j < data_len ; j++) {
+                ptr += sprintf(ptr, "%02x", frame[j]);
+                ptr += sprintf(ptr, " ");
+            }
+
+            char data_len_str[5];
+            char temp_str1[3] = {0};
+            char temp_str2[3] = {0};
+
+            sprintf(data_len_str, "%04x", data_len);
+            strncat(temp_str1, data_len_str, 2);
+            temp_str1[2] = '\0';
+            strncat(temp_str2, data_len_str + 2, 2);
+            temp_str2[2] = '\0';
+
+            PrintAndLogEx(NORMAL, "0.%010u", timestamp);
+            PrintAndLogEx(NORMAL, "000000 00 %s %s %s %s",
+                          (isResponse ? "ff" : "fe"),
+                          temp_str1,
+                          temp_str2,
+                          line);
+            ret = tracepos;
+            break;
+        }
+        default:
+            PrintAndLogEx(NORMAL, "Currently only 14a supported");
+            ret = traceLen;
+            break;
+    }
+
+    return ret;
+}
+
+static uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, uint8_t protocol, bool showWaitCycles, bool markCRCBytes) {
     // sanity check
     if (tracepos + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) > traceLen) return traceLen;
 
@@ -163,20 +261,32 @@ uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, ui
             case ISO_14443B:
             case TOPAZ:
             case FELICA:
-                crcStatus = iso14443B_CRC_check(frame, data_len);
+                crcStatus = !felica_CRC_check(frame + 2, data_len - 4);
                 break;
             case PROTO_MIFARE:
                 crcStatus = mifare_CRC_check(isResponse, frame, data_len);
                 break;
             case ISO_14443A:
             case MFDES:
+            case LTO:
                 crcStatus = iso14443A_CRC_check(isResponse, frame, data_len);
+                break;
+            case THINFILM:
+                frame[data_len - 1] ^= frame[data_len - 2];
+                frame[data_len - 2] ^= frame[data_len - 1];
+                frame[data_len - 1] ^= frame[data_len - 2];
+                crcStatus = iso14443A_CRC_check(true, frame, data_len);
+                frame[data_len - 1] ^= frame[data_len - 2];
+                frame[data_len - 2] ^= frame[data_len - 1];
+                frame[data_len - 1] ^= frame[data_len - 2];
                 break;
             case ISO_15693:
                 crcStatus = iso15693_CRC_check(frame, data_len);
                 break;
             case ISO_7816_4:
-            case PROTO_HITAG:
+            case PROTO_HITAG1:
+            case PROTO_HITAG2:
+            case PROTO_HITAGS:
             default:
                 break;
         }
@@ -186,19 +296,37 @@ uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, ui
     //2 Not crc-command
 
     //--- Draw the data column
-    char line[18][110];
+    char line[18][110] = {{0}};
 
     for (int j = 0; j < data_len && j / 18 < 18; j++) {
 
         uint8_t parityBits = parityBytes[j >> 3];
         if (protocol != LEGIC
                 && protocol != ISO_14443B
+                && protocol != ISO_15693
+                && protocol != ICLASS
                 && protocol != ISO_7816_4
-                && protocol != PROTO_HITAG
+                && protocol != PROTO_HITAG1
+                && protocol != PROTO_HITAG2
+                && protocol != PROTO_HITAGS
+                && protocol != THINFILM
+                && protocol != FELICA
+                && protocol != LTO
                 && (isResponse || protocol == ISO_14443A)
                 && (oddparity8(frame[j]) != ((parityBits >> (7 - (j & 0x0007))) & 0x01))) {
 
             snprintf(line[j / 18] + ((j % 18) * 4), 110, "%02x! ", frame[j]);
+        } else if (protocol == ICLASS  && isResponse == false) {
+            uint8_t parity = 0;
+            for (int i = 0; i < 6; i++) {
+                parity ^= ((frame[0] >> i) & 1);
+            }
+            if (parity == ((frame[0] >> 7) & 1)) {
+                snprintf(line[j / 18] + ((j % 18) * 4), 110, "%02x  ", frame[j]);
+            } else {
+                snprintf(line[j / 18] + ((j % 18) * 4), 110, "%02x! ", frame[j]);
+            }
+
         } else {
             snprintf(line[j / 18] + ((j % 18) * 4), 110, "%02x  ", frame[j]);
         }
@@ -221,7 +349,7 @@ uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, ui
     }
 
     // Draw the CRC column
-    char *crc = (crcStatus == 0 ? "!crc" : (crcStatus == 1 ? " ok " : "    "));
+    const char *crc = (crcStatus == 0 ? "!crc" : (crcStatus == 1 ? " ok " : "    "));
 
     EndOfTransmissionTimestamp = timestamp + duration;
 
@@ -231,6 +359,9 @@ uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, ui
 
     if (protocol == PROTO_MIFARE)
         annotateMifare(explanation, sizeof(explanation), frame, data_len, parityBytes, parity_len, isResponse);
+
+    if (protocol == FELICA)
+        annotateFelica(explanation, sizeof(explanation), frame, data_len);
 
     if (!isResponse) {
         switch (protocol) {
@@ -258,6 +389,18 @@ uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, ui
             case FELICA:
                 annotateFelica(explanation, sizeof(explanation), frame, data_len);
                 break;
+            case LTO:
+                annotateLTO(explanation, sizeof(explanation), frame, data_len);
+                break;
+            case PROTO_HITAG1:
+                annotateHitag1(explanation, sizeof(explanation), frame, data_len);
+                break;            
+            case PROTO_HITAG2:
+                annotateHitag2(explanation, sizeof(explanation), frame, data_len);
+                break;            
+            case PROTO_HITAGS:            
+                annotateHitagS(explanation, sizeof(explanation), frame, data_len);
+                break;            
             default:
                 break;
         }
@@ -291,7 +434,7 @@ uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, ui
                       sprint_hex_inrow_spaces(mfData, mfDataLen, 2),
                       (crcc == 0 ? "!crc" : (crcc == 1 ? " ok " : "    ")),
                       explanation);
-    };
+    }
 
     if (is_last_record(tracepos, trace, traceLen)) return traceLen;
 
@@ -307,195 +450,6 @@ uint16_t printTraceLine(uint16_t tracepos, uint16_t traceLen, uint8_t *trace, ui
     return tracepos;
 }
 
-void printFelica(uint16_t traceLen, uint8_t *trace) {
-
-    PrintAndLogEx(NORMAL, "ISO18092 / FeliCa - Timings are not as accurate");
-    PrintAndLogEx(NORMAL, "    Gap | Src | Data                            | CRC      | Annotation        |");
-    PrintAndLogEx(NORMAL, "--------|-----|---------------------------------|----------|-------------------|");
-    uint16_t tracepos = 0;
-
-    while (tracepos < traceLen) {
-
-        if (tracepos + 3 >= traceLen) break;
-
-
-        uint16_t gap = *((uint16_t *)(trace + tracepos));
-        uint8_t crc_ok = trace[tracepos + 2];
-        tracepos += 3;
-
-        if (tracepos + 3 >= traceLen) break;
-
-        uint16_t len = trace[tracepos + 2];
-
-        //I am stripping SYNC
-        tracepos += 3; //skip SYNC
-
-        if (tracepos + len + 1 >= traceLen) break;
-
-        uint8_t cmd = trace[tracepos];
-        uint8_t isResponse = cmd & 1;
-
-        char line[32][110];
-        for (int j = 0; j < len + 1 && j / 8 < 32; j++) {
-            snprintf(line[j / 8] + ((j % 8) * 4), 110, " %02x ", trace[tracepos + j]);
-        }
-        char expbuf[50];
-        switch (cmd) {
-            case FELICA_POLL_REQ:
-                snprintf(expbuf, 49, "Poll Req");
-                break;
-            case FELICA_POLL_ACK:
-                snprintf(expbuf, 49, "Poll Resp");
-                break;
-
-            case FELICA_REQSRV_REQ:
-                snprintf(expbuf, 49, "Request Srvc Req");
-                break;
-            case FELICA_REQSRV_ACK:
-                snprintf(expbuf, 49, "Request Srv Resp");
-                break;
-
-            case FELICA_RDBLK_REQ:
-                snprintf(expbuf, 49, "Read block(s) Req");
-                break;
-            case FELICA_RDBLK_ACK:
-                snprintf(expbuf, 49, "Read block(s) Resp");
-                break;
-
-            case FELICA_WRTBLK_REQ:
-                snprintf(expbuf, 49, "Write block(s) Req");
-                break;
-            case FELICA_WRTBLK_ACK:
-                snprintf(expbuf, 49, "Write block(s) Resp");
-                break;
-            case FELICA_SRCHSYSCODE_REQ:
-                snprintf(expbuf, 49, "Search syscode Req");
-                break;
-            case FELICA_SRCHSYSCODE_ACK:
-                snprintf(expbuf, 49, "Search syscode Resp");
-                break;
-
-            case FELICA_REQSYSCODE_REQ:
-                snprintf(expbuf, 49, "Request syscode Req");
-                break;
-            case FELICA_REQSYSCODE_ACK:
-                snprintf(expbuf, 49, "Request syscode Resp");
-                break;
-
-            case FELICA_AUTH1_REQ:
-                snprintf(expbuf, 49, "Auth1 Req");
-                break;
-            case FELICA_AUTH1_ACK:
-                snprintf(expbuf, 49, "Auth1 Resp");
-                break;
-
-            case FELICA_AUTH2_REQ:
-                snprintf(expbuf, 49, "Auth2 Req");
-                break;
-            case FELICA_AUTH2_ACK:
-                snprintf(expbuf, 49, "Auth2 Resp");
-                break;
-
-            case FELICA_RDSEC_REQ:
-                snprintf(expbuf, 49, "Secure read Req");
-                break;
-            case FELICA_RDSEC_ACK:
-                snprintf(expbuf, 49, "Secure read Resp");
-                break;
-
-            case FELICA_WRTSEC_REQ:
-                snprintf(expbuf, 49, "Secure write Req");
-                break;
-            case FELICA_WRTSEC_ACK:
-                snprintf(expbuf, 49, "Secure write Resp");
-                break;
-
-            case FELICA_REQSRV2_REQ:
-                snprintf(expbuf, 49, "Request Srvc v2 Req");
-                break;
-            case FELICA_REQSRV2_ACK:
-                snprintf(expbuf, 49, "Request Srvc v2 Resp");
-                break;
-
-            case FELICA_GETSTATUS_REQ:
-                snprintf(expbuf, 49, "Get status Req");
-                break;
-            case FELICA_GETSTATUS_ACK:
-                snprintf(expbuf, 49, "Get status Resp");
-                break;
-
-            case FELICA_OSVER_REQ:
-                snprintf(expbuf, 49, "Get OS Version Req");
-                break;
-            case FELICA_OSVER_ACK:
-                snprintf(expbuf, 49, "Get OS Version Resp");
-                break;
-
-            case FELICA_RESET_MODE_REQ:
-                snprintf(expbuf, 49, "Reset mode Req");
-                break;
-            case FELICA_RESET_MODE_ACK:
-                snprintf(expbuf, 49, "Reset mode Resp");
-                break;
-
-            case FELICA_AUTH1V2_REQ:
-                snprintf(expbuf, 49, "Auth1 v2 Req");
-                break;
-            case FELICA_AUTH1V2_ACK:
-                snprintf(expbuf, 49, "Auth1 v2 Resp");
-                break;
-
-            case FELICA_AUTH2V2_REQ:
-                snprintf(expbuf, 49, "Auth2 v2 Req");
-                break;
-            case FELICA_AUTH2V2_ACK:
-                snprintf(expbuf, 49, "Auth2 v2 Resp");
-                break;
-
-            case FELICA_RDSECV2_REQ:
-                snprintf(expbuf, 49, "Secure read v2 Req");
-                break;
-            case FELICA_RDSECV2_ACK:
-                snprintf(expbuf, 49, "Secure read v2 Resp");
-                break;
-            case FELICA_WRTSECV2_REQ:
-                snprintf(expbuf, 49, "Secure write v2 Req");
-                break;
-            case FELICA_WRTSECV2_ACK:
-                snprintf(expbuf, 49, "Secure write v2 Resp");
-                break;
-
-            case FELICA_UPDATE_RNDID_REQ:
-                snprintf(expbuf, 49, "Update IDr Req");
-                break;
-            case FELICA_UPDATE_RNDID_ACK:
-                snprintf(expbuf, 49, "Update IDr Resp");
-                break;
-            default:
-                snprintf(expbuf, 49, "Unknown");
-                break;
-        }
-
-        int num_lines = MIN((len) / 16 + 1, 16);
-        for (int j = 0; j < num_lines ; j++) {
-            if (j == 0) {
-                PrintAndLogEx(NORMAL, "%7d | %s |%-32s |%02x %02x %s| %s",
-                              gap,
-                              (isResponse ? "Tag" : "Rdr"),
-                              line[j],
-                              trace[tracepos + len],
-                              trace[tracepos + len + 1],
-                              (crc_ok) ? "OK" : "NG",
-                              expbuf);
-            } else {
-                PrintAndLogEx(NORMAL, "        |     |%-32s |        |    ", line[j]);
-            }
-        }
-        tracepos += len + 1;
-    }
-    PrintAndLogEx(NORMAL, "");
-}
-
 // sanity check. Don't use proxmark if it is offline and you didn't specify useTraceBuffer
 /*
 static int SanityOfflineCheck( bool useTraceBuffer ){
@@ -507,12 +461,95 @@ static int SanityOfflineCheck( bool useTraceBuffer ){
 }
 */
 
+static int CmdTraceLoad(const char *Cmd) {
+
+    FILE *f = NULL;
+    char filename[FILE_PATH_SIZE];
+    char cmdp = tolower(param_getchar(Cmd, 0));
+    if (strlen(Cmd) < 1 || cmdp == 'h') return usage_trace_load();
+
+    param_getstr(Cmd, 0, filename, sizeof(filename));
+
+    if ((f = fopen(filename, "rb")) == NULL) {
+        PrintAndLogEx(FAILED, "Could not open file " _YELLOW_("%s"), filename);
+        return PM3_EIO;
+    }
+
+    // get filesize in order to malloc memory
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (fsize < 0) {
+        PrintAndLogEx(FAILED, "error, when getting filesize");
+        fclose(f);
+        return PM3_EIO;
+    }
+    if (fsize < 4) {
+        PrintAndLogEx(FAILED, "error, file is too small");
+        fclose(f);
+        return PM3_ESOFT;
+    }
+
+    if (trace)
+        free(trace);
+
+    trace = calloc(fsize, sizeof(uint8_t));
+    if (!trace) {
+        PrintAndLogEx(FAILED, "Cannot allocate memory for trace");
+        fclose(f);
+        return PM3_EMALLOC;
+    }
+
+    size_t bytes_read = fread(trace, 1, fsize, f);
+    traceLen = bytes_read;
+    fclose(f);
+    PrintAndLogEx(SUCCESS, "Recorded Activity (TraceLen = %lu bytes) loaded from file %s", traceLen, filename);
+    return PM3_SUCCESS;
+}
+
+static int CmdTraceSave(const char *Cmd) {
+
+    if (traceLen == 0) {
+        PrintAndLogEx(WARNING, "trace is empty, nothing to save");
+        return PM3_SUCCESS;
+    }
+
+    char filename[FILE_PATH_SIZE];
+    char cmdp = tolower(param_getchar(Cmd, 0));
+    if (strlen(Cmd) < 1 || cmdp == 'h') return usage_trace_save();
+
+    param_getstr(Cmd, 0, filename, sizeof(filename));
+    saveFile(filename, ".bin", trace, traceLen);
+    return PM3_SUCCESS;
+}
+
+static command_t CommandTable[] = {
+    {"help",    CmdHelp,          AlwaysAvailable, "This help"},
+    {"list",    CmdTraceList,     AlwaysAvailable, "List protocol data in trace buffer"},
+    {"load",    CmdTraceLoad,     AlwaysAvailable, "Load trace from file"},
+    {"save",    CmdTraceSave,     AlwaysAvailable, "Save trace buffer to file"},
+    {NULL, NULL, NULL, NULL}
+};
+
+static int CmdHelp(const char *Cmd) {
+    (void)Cmd; // Cmd is not used so far
+    CmdsHelp(CommandTable);
+    return PM3_SUCCESS;
+}
+
+int CmdTrace(const char *Cmd) {
+    clearCommandBuffer();
+    return CmdsParse(CommandTable, Cmd);
+}
+
 int CmdTraceList(const char *Cmd) {
 
     clearCommandBuffer();
 
     bool showWaitCycles = false;
     bool markCRCBytes = false;
+    bool showHex = false;
     bool isOnline = true;
     bool errors = false;
     uint8_t protocol = 0;
@@ -539,6 +576,10 @@ int CmdTraceList(const char *Cmd) {
                     markCRCBytes = true;
                     cmdp++;
                     break;
+                case 'x':
+                    showHex = true;
+                    cmdp++;
+                    break;
                 case '0':
                     isOnline = true;
                     cmdp++;
@@ -558,7 +599,7 @@ int CmdTraceList(const char *Cmd) {
             str_lower(type);
 
             // validate type of output
-            if (strcmp(type,     "iclass") == 0)    protocol = ICLASS;
+            if (strcmp(type,      "iclass") == 0)   protocol = ICLASS;
             else if (strcmp(type, "14a") == 0)      protocol = ISO_14443A;
             else if (strcmp(type, "14b") == 0)      protocol = ISO_14443B;
             else if (strcmp(type, "topaz") == 0)    protocol = TOPAZ;
@@ -568,7 +609,11 @@ int CmdTraceList(const char *Cmd) {
             else if (strcmp(type, "15") == 0)       protocol = ISO_15693;
             else if (strcmp(type, "felica") == 0)   protocol = FELICA;
             else if (strcmp(type, "mf") == 0)       protocol = PROTO_MIFARE;
-            else if (strcmp(type, "hitag") == 0)    protocol = PROTO_HITAG;
+            else if (strcmp(type, "hitag1") == 0)   protocol = PROTO_HITAG1;
+            else if (strcmp(type, "hitag2") == 0)    protocol = PROTO_HITAG2;
+            else if (strcmp(type, "hitags") == 0)    protocol = PROTO_HITAGS;            
+            else if (strcmp(type, "thinfilm") == 0) protocol = THINFILM;
+            else if (strcmp(type, "lto") == 0)      protocol = LTO;
             else if (strcmp(type, "raw") == 0)      protocol = -1; //No crc, no annotations
             else errors = true;
 
@@ -584,54 +629,72 @@ int CmdTraceList(const char *Cmd) {
     uint16_t tracepos = 0;
 
     // reserv some space.
-    if (!trace)
-        trace = calloc(USB_CMD_DATA_SIZE, sizeof(uint8_t));
+    if (!trace) {
+        trace = calloc(PM3_CMD_DATA_SIZE, sizeof(uint8_t));
+        if (trace == NULL) {
+            PrintAndLogEx(FAILED, "Cannot allocate memory for trace");
+            return PM3_EMALLOC;
+        }
+    }
 
     if (isOnline) {
-        // Query for the size of the trace,  downloading USB_CMD_DATA_SIZE
-        UsbCommand response;
-        if (!GetFromDevice(BIG_BUF, trace, USB_CMD_DATA_SIZE, 0, &response, 4000, true)) {
+        // Query for the size of the trace,  downloading PM3_CMD_DATA_SIZE
+        PacketResponseNG response;
+        if (!GetFromDevice(BIG_BUF, trace, PM3_CMD_DATA_SIZE, 0, NULL, 0, &response, 4000, true)) {
             PrintAndLogEx(WARNING, "timeout while waiting for reply.");
-            return 1;
+            return PM3_ETIMEOUT;
         }
 
-        traceLen = response.arg[2];
-        if (traceLen > USB_CMD_DATA_SIZE) {
+        traceLen = response.oldarg[2];
+        if (traceLen > PM3_CMD_DATA_SIZE) {
             uint8_t *p = realloc(trace, traceLen);
             if (p == NULL) {
                 PrintAndLogEx(FAILED, "Cannot allocate memory for trace");
                 free(trace);
-                return 2;
+                return PM3_EMALLOC;
             }
             trace = p;
-            if (!GetFromDevice(BIG_BUF, trace, traceLen, 0, NULL, 2500, false)) {
+            if (!GetFromDevice(BIG_BUF, trace, traceLen, 0, NULL, 0, NULL, 2500, false)) {
                 PrintAndLogEx(WARNING, "command execution time out");
                 free(trace);
-                return 3;
+                return PM3_ETIMEOUT;
             }
         }
     }
 
-    PrintAndLogEx(SUCCESS, "Recorded Activity (TraceLen = %d bytes)", traceLen);
-    PrintAndLogEx(INFO, "");
+    PrintAndLogEx(SUCCESS, "Recorded activity (trace len = " _YELLOW_("%lu") "bytes)", traceLen);
+
+    /*
     if (protocol == FELICA) {
         printFelica(traceLen, trace);
-    } else {
-        PrintAndLogEx(NORMAL, "Start = Start of Start Bit, End = End of last modulation. Src = Source of Transfer");
-        if (protocol == ISO_14443A || protocol == PROTO_MIFARE)
-            PrintAndLogEx(NORMAL, "iso14443a - All times are in carrier periods (1/13.56Mhz)");
-        if (protocol == ICLASS)
-            PrintAndLogEx(NORMAL, "iClass - Timings are not as accurate");
-        if (protocol == LEGIC)
-            PrintAndLogEx(NORMAL, "LEGIC - Reader Mode: Timings are in ticks (1us == 1.5ticks)\n"
-                          "        Tag Mode: Timings are in sub carrier periods (1/212 kHz == 4.7us)");
-        if (protocol == ISO_15693)
-            PrintAndLogEx(NORMAL, "ISO15693 - Timings are not as accurate");
-        if (protocol == ISO_7816_4)
-            PrintAndLogEx(NORMAL, "ISO7816-4 / Smartcard - Timings N/A yet");
-        if (protocol == PROTO_HITAG)
-            PrintAndLogEx(NORMAL, "Hitag2 / HitagS - Timings in ETU (8us)");
+    } */
 
+    if (showHex) {
+        while (tracepos < traceLen) {
+            tracepos = printHexLine(tracepos, traceLen, trace, protocol);
+        }
+    } else {
+        PrintAndLogEx(INFO, _YELLOW_("Start") "= Start of Start Bit, " _YELLOW_("End") "= End of last modulation. " _YELLOW_("Src") "= Source of Transfer");
+        if (protocol == ISO_14443A || protocol == PROTO_MIFARE || protocol == MFDES || protocol == TOPAZ || protocol == LTO)
+            PrintAndLogEx(INFO, "ISO14443A - All times are in carrier periods (1/13.56MHz)");
+        if (protocol == THINFILM)
+            PrintAndLogEx(INFO, "Thinfilm - All times are in carrier periods (1/13.56MHz)");
+        if (protocol == ICLASS)
+            PrintAndLogEx(INFO, "iClass - Timings are not as accurate");
+        if (protocol == LEGIC)
+            PrintAndLogEx(INFO, "LEGIC - Reader Mode: Timings are in ticks (1us == 1.5ticks)\n"
+                          "        Tag Mode: Timings are in sub carrier periods (1/212 kHz == 4.7us)");
+        if (protocol == ISO_14443B)
+            PrintAndLogEx(INFO, "ISO14443B"); // Timings ?
+        if (protocol == ISO_15693)
+            PrintAndLogEx(INFO, "ISO15693 - Timings are not as accurate");
+        if (protocol == ISO_7816_4)
+            PrintAndLogEx(INFO, "ISO7816-4 / Smartcard - Timings N/A yet");
+        if (protocol == PROTO_HITAG1 || protocol == PROTO_HITAG2 || protocol == PROTO_HITAGS)
+            PrintAndLogEx(INFO, "Hitag1 / Hitag2 / HitagS - Timings in ETU (8us)");
+        if (protocol == FELICA)
+            PrintAndLogEx(INFO, "ISO18092 / FeliCa - Timings are not as accurate");
+        
         PrintAndLogEx(NORMAL, "");
         PrintAndLogEx(NORMAL, "      Start |        End | Src | Data (! denotes parity error)                                           | CRC | Annotation");
         PrintAndLogEx(NORMAL, "------------+------------+-----+-------------------------------------------------------------------------+-----+--------------------");
@@ -639,89 +702,11 @@ int CmdTraceList(const char *Cmd) {
         ClearAuthData();
         while (tracepos < traceLen) {
             tracepos = printTraceLine(tracepos, traceLen, trace, protocol, showWaitCycles, markCRCBytes);
+
+            if (kbd_enter_pressed())
+                break;
         }
     }
-    return 0;
+    return PM3_SUCCESS;
 }
 
-int CmdTraceLoad(const char *Cmd) {
-
-    FILE *f = NULL;
-    char filename[FILE_PATH_SIZE];
-    char cmdp = tolower(param_getchar(Cmd, 0));
-    if (strlen(Cmd) < 1 || cmdp == 'h') return usage_trace_load();
-
-    param_getstr(Cmd, 0, filename, sizeof(filename));
-
-    if ((f = fopen(filename, "rb")) == NULL) {
-        PrintAndLogEx(FAILED, "Could not open file %s", filename);
-        return 0;
-    }
-
-    // get filesize in order to malloc memory
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (fsize < 0) {
-        PrintAndLogEx(FAILED, "error, when getting filesize");
-        fclose(f);
-        return 3;
-    }
-    if (fsize < 4) {
-        PrintAndLogEx(FAILED, "error, file is too small");
-        fclose(f);
-        return 4;
-    }
-
-    if (trace)
-        free(trace);
-
-    trace = calloc(fsize, sizeof(uint8_t));
-    if (!trace) {
-        PrintAndLogEx(FAILED, "Cannot allocate memory for trace");
-        fclose(f);
-        return 2;
-    }
-
-    size_t bytes_read = fread(trace, 1, fsize, f);
-    traceLen = bytes_read;
-    fclose(f);
-    PrintAndLogEx(SUCCESS, "Recorded Activity (TraceLen = %d bytes) loaded from file %s", traceLen, filename);
-    return 0;
-}
-
-int CmdTraceSave(const char *Cmd) {
-
-    if (traceLen == 0) {
-        PrintAndLogEx(WARNING, "trace is empty, nothing to save");
-        return 0;
-    }
-
-    char filename[FILE_PATH_SIZE];
-    char cmdp = tolower(param_getchar(Cmd, 0));
-    if (strlen(Cmd) < 1 || cmdp == 'h') return usage_trace_save();
-
-    param_getstr(Cmd, 0, filename, sizeof(filename));
-    saveFile(filename, "bin", trace, traceLen);
-    return 0;
-}
-
-static command_t CommandTable[] = {
-    {"help",    CmdHelp,          1, "This help"},
-    {"list",    CmdTraceList,     1, "List protocol data in trace buffer"},
-    {"load",    CmdTraceLoad,     1, "Load trace from file"},
-    {"save",    CmdTraceSave,     1, "Save trace buffer to file"},
-    {NULL, NULL, 0, NULL}
-};
-
-int CmdTrace(const char *Cmd) {
-    clearCommandBuffer();
-    CmdsParse(CommandTable, Cmd);
-    return 0;
-}
-
-int CmdHelp(const char *Cmd) {
-    CmdsHelp(CommandTable);
-    return 0;
-}

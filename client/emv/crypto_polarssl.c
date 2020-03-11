@@ -18,11 +18,8 @@
 #include <config.h>
 #endif
 
-#include "crypto.h"
 #include "crypto_backend.h"
 
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -139,9 +136,15 @@ static struct crypto_pk *crypto_pk_polarssl_open_priv_rsa(va_list vl) {
     mbedtls_mpi_read_binary(&cp->ctx.Q, (const unsigned char *)q, qlen);
     mbedtls_mpi_read_binary(&cp->ctx.DP, (const unsigned char *)dp, dplen);
     mbedtls_mpi_read_binary(&cp->ctx.DQ, (const unsigned char *)dq, dqlen);
-    mbedtls_mpi_inv_mod(&cp->ctx.QP, &cp->ctx.Q, &cp->ctx.P);
 
-    int res = mbedtls_rsa_check_privkey(&cp->ctx);
+    int res = mbedtls_mpi_inv_mod(&cp->ctx.QP, &cp->ctx.Q, &cp->ctx.P);
+    if (res != 0) {
+        fprintf(stderr, "PolarSSL private key error res=%x exp=%d mod=%d.\n", res * -1, explen, modlen);
+        free(cp);
+        return NULL;
+    }
+
+    res = mbedtls_rsa_check_privkey(&cp->ctx);
     if (res != 0) {
         fprintf(stderr, "PolarSSL private key error res=%x exp=%d mod=%d.\n", res * -1, explen, modlen);
         free(cp);
@@ -153,9 +156,7 @@ static struct crypto_pk *crypto_pk_polarssl_open_priv_rsa(va_list vl) {
 
 static int myrand(void *rng_state, unsigned char *output, size_t len) {
     size_t i;
-
-    if (rng_state != NULL)
-        rng_state = NULL;
+    rng_state = NULL;
 
     for (i = 0; i < len; ++i)
         output[i] = rand();
@@ -177,7 +178,7 @@ static struct crypto_pk *crypto_pk_polarssl_genkey_rsa(va_list vl) {
 
     int res = mbedtls_rsa_gen_key(&cp->ctx, &myrand, NULL, nbits, exp);
     if (res) {
-        fprintf(stderr, "PolarSSL private key generation error res=%x exp=%d nbits=%d.\n", res * -1, exp, nbits);
+        fprintf(stderr, "PolarSSL private key generation error res=%x exp=%u nbits=%u.\n", res * -1, exp, nbits);
         free(cp);
         return NULL;
     }
@@ -208,7 +209,7 @@ static unsigned char *crypto_pk_polarssl_encrypt(const struct crypto_pk *_cp, co
 
     res = mbedtls_rsa_public(&cp->ctx, buf, result);
     if (res) {
-        printf("RSA encrypt failed. Error: %x data len: %zd key len: %zd\n", res * -1, len, keylen);
+        printf("RSA encrypt failed. Error: %x data len: %zu key len: %zu\n", res * -1, len, keylen);
         free(result);
         return NULL;
     }
@@ -234,7 +235,7 @@ static unsigned char *crypto_pk_polarssl_decrypt(const struct crypto_pk *_cp, co
 
     res = mbedtls_rsa_private(&cp->ctx, NULL, NULL, buf, result); // CHECK???
     if (res) {
-        printf("RSA decrypt failed. Error: %x data len: %zd key len: %zd\n", res * -1, len, keylen);
+        printf("RSA decrypt failed. Error: %x data len: %zu key len: %zu\n", res * -1, len, keylen);
         free(result);
         return NULL;
     }
@@ -248,29 +249,39 @@ static size_t crypto_pk_polarssl_get_nbits(const struct crypto_pk *_cp) {
     struct crypto_pk_polarssl *cp = (struct crypto_pk_polarssl *)_cp;
 
     return cp->ctx.len * 8;
-    return 0;
 }
 
 static unsigned char *crypto_pk_polarssl_get_parameter(const struct crypto_pk *_cp, unsigned param, size_t *plen) {
     struct crypto_pk_polarssl *cp = (struct crypto_pk_polarssl *)_cp;
     unsigned char *result = NULL;
+    int res;
     switch (param) {
         // mod
         case 0:
             *plen = mbedtls_mpi_size(&cp->ctx.N);
             result = malloc(*plen);
             memset(result, 0x00, *plen);
-            mbedtls_mpi_write_binary(&cp->ctx.N, result, *plen);
+            res = mbedtls_mpi_write_binary(&cp->ctx.N, result, *plen);
+            if (res < 0) {
+                printf("Error write_binary.");
+                free(result);
+                result = 0;
+            }
             break;
         // exp
         case 1:
             *plen = mbedtls_mpi_size(&cp->ctx.E);
             result = malloc(*plen);
             memset(result, 0x00, *plen);
-            mbedtls_mpi_write_binary(&cp->ctx.E, result, *plen);
+            res = mbedtls_mpi_write_binary(&cp->ctx.E, result, *plen);
+            if (res < 0) {
+                printf("Error write_binary.");
+                free(result);
+                result = 0;
+            }
             break;
         default:
-            printf("Error get parameter. Param=%d", param);
+            printf("Error get parameter. Param = %u", param);
             break;
     }
 

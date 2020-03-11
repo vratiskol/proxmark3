@@ -1,12 +1,12 @@
-#include "crapto1.h"
+#include "crapto1/crapto1.h"
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 #include <stdio.h>
 
 int main(const int argc, const char *argv[]) {
     struct Crypto1State *state;
-    uint32_t pos, uid, nt, nr, rr, nr_diff;
-    uint8_t bt, i, ks3x[8], par[8][8];
+    uint32_t pos, uid, nt, nr, rr;
+    uint8_t ks3x[8], par[8][8];
     uint64_t key_recovered;
     uint64_t par_info;
     uint64_t ks_info;
@@ -28,9 +28,9 @@ int main(const int argc, const char *argv[]) {
 
     for (pos = 0; pos < 8; pos++) {
         ks3x[7 - pos] = (ks_info >> (pos * 8)) & 0x0f;
-        bt = (par_info >> (pos * 8)) & 0xff;
+        uint8_t bt = (par_info >> (pos * 8)) & 0xff;
 
-        for (i = 0; i < 8; i++) {
+        for (uint8_t i = 0; i < 8; i++) {
             par[7 - pos][i] = (bt >> i) & 0x01;
         }
     }
@@ -38,8 +38,8 @@ int main(const int argc, const char *argv[]) {
     printf("|diff|{nr}    |ks3|ks3^5|parity         |\n");
     printf("+----+--------+---+-----+---------------+\n");
 
-    for (i = 0; i < 8; i++) {
-        nr_diff = nr | i << 5;
+    for (uint8_t i = 0; i < 8; i++) {
+        uint32_t nr_diff = nr | i << 5;
         printf("| %02x |%08x| %01x |  %01x  |", i << 5, nr_diff, ks3x[i], ks3x[i] ^ 5);
 
         for (pos = 0; pos < 7; pos++)
@@ -48,7 +48,7 @@ int main(const int argc, const char *argv[]) {
     }
     printf("+----+--------+---+-----+---------------+\n");
 
-    state = lfsr_common_prefix(nr, rr, ks3x, par);
+    state = lfsr_common_prefix(nr, rr, ks3x, par, false);
     lfsr_rollback_word(state, uid ^ nt, 0);
     crypto1_get_lfsr(state, &key_recovered);
     printf("\nkey recovered: %012" PRIx64 "\n\n", key_recovered);

@@ -10,17 +10,14 @@
 #ifndef __MFDESFIRE_H
 #define __MFDESFIRE_H
 
-int CmdHFMFDes(const char *Cmd);
-int CmdHF14ADesAuth(const char *cmd);
-int CmdHF14ADesRb(const char *cmd);
-int CmdHF14ADesWb(const char *cmd);
-int CmdHF14ADesInfo(const char *Cmd);
-int CmdHF14ADesEnumApplications(const char *Cmd);
+#include "common.h"
 
-char *GetCardSizeStr(uint8_t fsize);
-char *GetProtocolStr(uint8_t id);
-char *GetVersionStr(uint8_t major, uint8_t minor);
-void GetKeySettings(uint8_t *aid);
+int CmdHFMFDes(const char *Cmd);
+
+char *getCardSizeStr(uint8_t fsize);
+char *getProtocolStr(uint8_t id);
+char *getVersionStr(uint8_t major, uint8_t minor);
+void getKeySettings(uint8_t *aid);
 
 // Command options for Desfire behavior.
 enum  {

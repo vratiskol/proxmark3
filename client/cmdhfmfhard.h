@@ -11,8 +11,7 @@
 #ifndef CMDHFMFHARD_H__
 #define CMDHFMFHARD_H__
 
-#include <stdint.h>
-#include <stdbool.h>
+#include "common.h"
 
 #define NUM_SUMS 19 // number of possible sum property values
 
@@ -41,8 +40,8 @@ typedef struct noncelist {
     noncelistentry_t *first;
 } noncelist_t;
 
-extern int mfnestedhard(uint8_t blockNo, uint8_t keyType, uint8_t *key, uint8_t trgBlockNo, uint8_t trgKeyType, uint8_t *trgkey, bool nonce_file_read, bool nonce_file_write, bool slow, int tests, uint64_t *foundkey, char *filename);
-extern void hardnested_print_progress(uint32_t nonces, char *activity, float brute_force, uint64_t min_diff_print_time);
+int mfnestedhard(uint8_t blockNo, uint8_t keyType, uint8_t *key, uint8_t trgBlockNo, uint8_t trgKeyType, uint8_t *trgkey, bool nonce_file_read, bool nonce_file_write, bool slow, int tests, uint64_t *foundkey, char *filename);
+void hardnested_print_progress(uint32_t nonces, const char *activity, float brute_force, uint64_t min_diff_print_time);
 
 #endif
 

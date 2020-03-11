@@ -12,6 +12,8 @@
 #ifndef CMDLFPCF7931_H__
 #define CMDLFPCF7931_H__
 
+#include "common.h"
+
 struct pcf7931_config {
     uint8_t Pwd[7];
     uint16_t InitDelay;
@@ -19,17 +21,9 @@ struct pcf7931_config {
     int16_t OffsetPosition;
 };
 
-int pcf7931_resetConfig();
-int pcf7931_printConfig();
-
-int usage_pcf7931_read();
-int usage_pcf7931_write();
-int usage_pcf7931_config();
+int pcf7931_resetConfig(void);
+int pcf7931_printConfig(void);
 
 int CmdLFPCF7931(const char *Cmd);
-
-int CmdLFPCF7931Read(const char *Cmd);
-int CmdLFPCF7931Write(const char *Cmd);
-int CmdLFPCF7931Config(const char *Cmd);
 
 #endif

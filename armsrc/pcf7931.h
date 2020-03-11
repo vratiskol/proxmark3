@@ -1,15 +1,11 @@
 #ifndef __PCF7931_H
 #define __PCF7931_H
 
-#include "proxmark3.h"
-#include "apps.h"
-#include "lfsampling.h"
-#include "pcf7931.h"
-#include "string.h"
+#include "common.h"
 
 size_t DemodPCF7931(uint8_t **outBlocks);
-bool IsBlock0PCF7931(uint8_t *Block);
-bool IsBlock1PCF7931(uint8_t *Block);
+bool IsBlock0PCF7931(uint8_t *block);
+bool IsBlock1PCF7931(uint8_t *block);
 void ReadPCF7931();
 void SendCmdPCF7931(uint32_t *tab);
 bool AddBytePCF7931(uint8_t byte, uint32_t *tab, int32_t l, int32_t p);

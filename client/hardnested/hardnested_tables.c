@@ -19,9 +19,15 @@
 //
 //-----------------------------------------------------------------------------
 
+// To compile it:
+// gcc -std=c99 -I ../../common -o hardnested_tables hardnested_tables.c
+
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#ifndef __APPLE__
+#include <malloc.h>
+#endif
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -44,9 +50,10 @@ static uint16_t PartialSumProperty(uint32_t state, odd_even_t odd_even) {
         uint32_t st = state;
         uint16_t part_sum = 0;
         if (odd_even == ODD_STATE) {
-            for (uint16_t i = 0; i < 5; i++) {
-                part_sum ^= filter(st);
+            part_sum ^= filter(st);
+            for (uint16_t i = 0; i < 4; i++) {
                 st = (st << 1) | ((j >> (3 - i)) & 0x01) ;
+                part_sum ^= filter(st);
             }
             part_sum ^= 1; // XOR 1 cancelled out for the other 8 bits
         } else {
@@ -64,8 +71,23 @@ static uint16_t PartialSumProperty(uint32_t state, odd_even_t odd_even) {
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // bitarray functions
 
-#define malloc_bitarray(x) __builtin_assume_aligned(_aligned_malloc(x, __BIGGEST_ALIGNMENT__), __BIGGEST_ALIGNMENT__)
+#if defined (_WIN32)
+#define malloc_bitarray(x) __builtin_assume_aligned(_aligned_malloc((x), __BIGGEST_ALIGNMENT__), __BIGGEST_ALIGNMENT__)
 #define free_bitarray(x) _aligned_free(x)
+#elif defined (__APPLE__)
+static void *malloc_bitarray(size_t x) {
+    char *allocated_memory;
+    if (posix_memalign((void **)&allocated_memory, __BIGGEST_ALIGNMENT__, x)) {
+        return NULL;
+    } else {
+        return __builtin_assume_aligned(allocated_memory, __BIGGEST_ALIGNMENT__);
+    }
+}
+#define free_bitarray(x) free(x)
+#else
+#define malloc_bitarray(x) memalign(__BIGGEST_ALIGNMENT__, (x))
+#define free_bitarray(x) free(x)
+#endif
 
 static inline void clear_bitarray24(uint32_t *bitarray) {
     memset(bitarray, 0x00, sizeof(uint32_t) * (1 << 19));
@@ -240,7 +262,7 @@ void init_sum_bitarray(uint16_t sum_a0) {
     }
     for (odd_even_t odd_even = EVEN_STATE; odd_even <= ODD_STATE; odd_even++) {
         uint32_t count = count_states(sum_a0_bitarray[odd_even]);
-        printf("sum_a0_bitarray[%s] has %d states (%5.2f%%)\n", odd_even == EVEN_STATE ? "even" : "odd ", count, (float)count / (1 << 24) * 100.0);
+        printf("sum_a0_bitarray[%s] has %u states (%5.2f%%)\n", odd_even == EVEN_STATE ? "even" : "odd ", count, (float)count / (1 << 24) * 100.0);
     }
     printf("done.\n");
 }
@@ -350,7 +372,7 @@ static void precalculate_bit0_bitflip_bitarrays(uint8_t const bitflip, uint16_t 
     for (odd_even_t odd_even = EVEN_STATE; odd_even <= ODD_STATE; odd_even++) {
         count[odd_even] = count_states(test_bitarray[odd_even]);
         if (count[odd_even] != 1 << 24) {
-            printf("Writing %d possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
+            printf("Writing %u possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
                    count[odd_even],
                    odd_even == EVEN_STATE ? "even" : "odd",
                    bitflip, (1 << 24) - count[odd_even],
@@ -368,7 +390,7 @@ static void precalculate_bit0_bitflip_bitarrays(uint8_t const bitflip, uint16_t 
         if (count[odd_even] != 1 << 24) {
             for (uint32_t state = 0; state < (1 << 24); state += 1 << 4) {
                 uint32_t line = test_bitarray[odd_even][state >> 5];
-                uint16_t half_line = state & 0x000000010 ? line & 0x0000ffff : line >> 16;
+                uint16_t half_line = (state & 0x000000010) ? line & 0x0000ffff : line >> 16;
                 if (half_line != 0) {
                     for (uint32_t low_bits = 0; low_bits < (1 << 4); low_bits++) {
                         set_bit24(test_bitarray_2nd, low_bits << 20 | state >> 4);
@@ -377,7 +399,7 @@ static void precalculate_bit0_bitflip_bitarrays(uint8_t const bitflip, uint16_t 
             }
             count[odd_even] = count_states(test_bitarray_2nd);
             if (count[odd_even] != 1 << 24) {
-                printf("Writing %d possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
+                printf("Writing %u possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
                        count[odd_even],
                        odd_even == EVEN_STATE ? "even" : "odd",
                        bitflip | BITFLIP_2ND_BYTE, (1 << 24) - count[odd_even],
@@ -462,7 +484,7 @@ static void precalculate_bit0_bitflip_bitarrays(uint8_t const bitflip, uint16_t 
     for (odd_even_t odd_even = EVEN_STATE; odd_even <= ODD_STATE; odd_even++) {
         count[odd_even] = count_states(test_not_bitarray[odd_even]);
         if (count[odd_even] != 1 << 24) {
-            printf("Writing %d possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
+            printf("Writing %u possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
                    count[odd_even],
                    odd_even == EVEN_STATE ? "even" : "odd",
                    bitflip | 0x100, (1 << 24) - count[odd_even],
@@ -480,7 +502,7 @@ static void precalculate_bit0_bitflip_bitarrays(uint8_t const bitflip, uint16_t 
         if (count[odd_even] != 1 << 24) {
             for (uint32_t state = 0; state < (1 << 24); state += 1 << 4) {
                 uint32_t line = test_not_bitarray[odd_even][state >> 5];
-                uint16_t half_line = state & 0x000000010 ? line & 0x0000ffff : line >> 16;
+                uint16_t half_line = (state & 0x000000010) ? line & 0x0000ffff : line >> 16;
                 if (half_line != 0) {
                     for (uint32_t low_bits = 0; low_bits < (1 << 4); low_bits++) {
                         set_bit24(test_bitarray_2nd, low_bits << 20 | state >> 4);
@@ -489,7 +511,7 @@ static void precalculate_bit0_bitflip_bitarrays(uint8_t const bitflip, uint16_t 
             }
             count[odd_even] = count_states(test_bitarray_2nd);
             if (count[odd_even] != 1 << 24) {
-                printf("Writing %d possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
+                printf("Writing %u possible %s states for bitflip property %03x (%d (%1.2f%%) states eliminated)\n",
                        count[odd_even],
                        odd_even == EVEN_STATE ? "even" : "odd",
                        bitflip | 0x100 | BITFLIP_2ND_BYTE, (1 << 24) - count[odd_even],
@@ -518,7 +540,7 @@ static void precalculate_bit0_bitflip_bitarrays(uint8_t const bitflip, uint16_t 
 int main(int argc, char *argv[]) {
 
     unsigned int bitflip_in;
-    int sum_a0;
+    int sum_a0 = 0;
 
     printf("Create tables required by hardnested attack.\n");
     printf("Expect a runtime in the range of days or weeks.\n");
@@ -542,7 +564,7 @@ int main(int argc, char *argv[]) {
     }
 
     switch (sum_a0) {
-        case 0:
+        case  0:
         case  32:
         case  56:
         case  64:

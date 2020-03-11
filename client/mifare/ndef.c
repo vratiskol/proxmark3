@@ -9,7 +9,11 @@
 //-----------------------------------------------------------------------------
 
 #include "ndef.h"
+
+#include <string.h>
+
 #include "ui.h"
+#include "util.h" // sprint_hex...
 #include "emv/dump.h"
 #include "crypto/asn1utils.h"
 
@@ -80,7 +84,7 @@ static const char *URI_s[] = {
     "urn:nfc:"                    // 0x23
 };
 
-uint16_t ndefTLVGetLength(uint8_t *data, size_t *indx) {
+static uint16_t ndefTLVGetLength(uint8_t *data, size_t *indx) {
     uint16_t len = 0;
     if (data[0] == 0xff) {
         len = (data[1] << 8) + data[2];
@@ -93,7 +97,7 @@ uint16_t ndefTLVGetLength(uint8_t *data, size_t *indx) {
     return len;
 }
 
-int ndefDecodeHeader(uint8_t *data, size_t datalen, NDEFHeader_t *header) {
+static int ndefDecodeHeader(uint8_t *data, size_t datalen, NDEFHeader_t *header) {
     header->Type = NULL;
     header->Payload = NULL;
     header->ID = NULL;
@@ -115,7 +119,6 @@ int ndefDecodeHeader(uint8_t *data, size_t datalen, NDEFHeader_t *header) {
 
     if (header->IDLenPresent) {
         header->IDLen = (header->ShortRecordBit ? (data[3]) : (data[6]));
-        header->Payload = header->Type + header->TypeLen;
     } else {
         header->IDLen = 0;
     }
@@ -130,7 +133,7 @@ int ndefDecodeHeader(uint8_t *data, size_t datalen, NDEFHeader_t *header) {
     return 0;
 }
 
-int ndefPrintHeader(NDEFHeader_t *header) {
+static int ndefPrintHeader(NDEFHeader_t *header) {
     PrintAndLogEx(INFO, "Header:");
 
     PrintAndLogEx(NORMAL, "\tMessage Begin:    %s", STRBOOL(header->MessageBegin));
@@ -140,16 +143,16 @@ int ndefPrintHeader(NDEFHeader_t *header) {
     PrintAndLogEx(NORMAL, "\tID Len Present:   %s", STRBOOL(header->IDLenPresent));
     PrintAndLogEx(NORMAL, "\tType Name Format: [0x%02x] %s", header->TypeNameFormat, TypeNameFormat_s[header->TypeNameFormat]);
 
-    PrintAndLogEx(NORMAL, "\tHeader length    : %d", header->len);
-    PrintAndLogEx(NORMAL, "\tType length      : %d", header->TypeLen);
-    PrintAndLogEx(NORMAL, "\tPayload length   : %d", header->PayloadLen);
-    PrintAndLogEx(NORMAL, "\tID length        : %d", header->IDLen);
-    PrintAndLogEx(NORMAL, "\tRecord length    : %d", header->RecLen);
+    PrintAndLogEx(NORMAL, "\tHeader length    : %zu", header->len);
+    PrintAndLogEx(NORMAL, "\tType length      : %zu", header->TypeLen);
+    PrintAndLogEx(NORMAL, "\tPayload length   : %zu", header->PayloadLen);
+    PrintAndLogEx(NORMAL, "\tID length        : %zu", header->IDLen);
+    PrintAndLogEx(NORMAL, "\tRecord length    : %zu", header->RecLen);
 
     return 0;
 }
 
-int ndefDecodeSig(uint8_t *sig, size_t siglen) {
+static int ndefDecodeSig(uint8_t *sig, size_t siglen) {
     size_t indx = 0;
     PrintAndLogEx(NORMAL, "\tsignature version: 0x%02x", sig[0]);
     if (sig[0] != 0x01) {
@@ -168,7 +171,7 @@ int ndefDecodeSig(uint8_t *sig, size_t siglen) {
     // ecdsa 0x04
     if (sigType == stECDSA) {
         indx += 3;
-        PrintAndLogEx(NORMAL, "\tsignature [%d]: %s", intsiglen, sprint_hex_inrow(&sig[indx], intsiglen));
+        PrintAndLogEx(NORMAL, "\tsignature [%zu]: %s", intsiglen, sprint_hex_inrow(&sig[indx], intsiglen));
 
         uint8_t rval[300] = {0};
         uint8_t sval[300] = {0};
@@ -183,7 +186,7 @@ int ndefDecodeSig(uint8_t *sig, size_t siglen) {
     if (sigURI) {
         size_t intsigurilen = (sig[indx] << 8) + sig[indx + 1];
         indx += 2;
-        PrintAndLogEx(NORMAL, "\tsignature uri [%d]: %.*s", intsigurilen, intsigurilen, &sig[indx]);
+        PrintAndLogEx(NORMAL, "\tsignature uri [%zu]: %.*s", intsigurilen, (int)intsigurilen, &sig[indx]);
         indx += intsigurilen;
     }
 
@@ -200,7 +203,7 @@ int ndefDecodeSig(uint8_t *sig, size_t siglen) {
         size_t intcertlen = (sig[indx + 1] << 8) + sig[indx + 2];
         indx += 2;
 
-        PrintAndLogEx(NORMAL, "\tcertificate %d [%d]: %s", i + 1, intcertlen, sprint_hex_inrow(&sig[indx], intcertlen));
+        PrintAndLogEx(NORMAL, "\tcertificate %d [%zu]: %s", i + 1, intcertlen, sprint_hex_inrow(&sig[indx], intcertlen));
         indx += intcertlen;
     }
 
@@ -208,26 +211,30 @@ int ndefDecodeSig(uint8_t *sig, size_t siglen) {
     if ((indx <= siglen) && certURI) {
         size_t inturilen = (sig[indx] << 8) + sig[indx + 1];
         indx += 2;
-        PrintAndLogEx(NORMAL, "\tcertificate uri [%d]: %.*s", inturilen, inturilen, &sig[indx]);
-        indx += inturilen;
+        PrintAndLogEx(NORMAL, "\tcertificate uri [%zu]: %.*s", inturilen, (int)inturilen, &sig[indx]);
     }
 
     return 0;
 };
 
-int ndefDecodePayload(NDEFHeader_t *ndef) {
+static int ndefDecodePayload(NDEFHeader_t *ndef) {
 
     switch (ndef->TypeNameFormat) {
         case tnfWellKnownRecord:
             PrintAndLogEx(INFO, "Well Known Record");
-            PrintAndLogEx(NORMAL, "\ttype:    %.*s", ndef->TypeLen, ndef->Type);
+            PrintAndLogEx(NORMAL, "\ttype:    %.*s", (int)ndef->TypeLen, ndef->Type);
 
             if (!strncmp((char *)ndef->Type, "T", ndef->TypeLen)) {
-                PrintAndLogEx(NORMAL, "\ttext   : %.*s", ndef->PayloadLen, ndef->Payload);
+                PrintAndLogEx(NORMAL, "\ttext   : %.*s", (int)ndef->PayloadLen, ndef->Payload);
             }
 
             if (!strncmp((char *)ndef->Type, "U", ndef->TypeLen)) {
-                PrintAndLogEx(NORMAL, "\turi    : %s%.*s", (ndef->Payload[0] <= 0x23 ? URI_s[ndef->Payload[0]] : "[err]"), ndef->PayloadLen, &ndef->Payload[1]);
+                PrintAndLogEx(NORMAL
+                              , "\turi    : %s%.*s"
+                              , (ndef->Payload[0] <= 0x23 ? URI_s[ndef->Payload[0]] : "[err]")
+                              , (int)(ndef->PayloadLen - 1)
+                              , &ndef->Payload[1]
+                             );
             }
 
             if (!strncmp((char *)ndef->Type, "Sig", ndef->TypeLen)) {
@@ -237,16 +244,20 @@ int ndefDecodePayload(NDEFHeader_t *ndef) {
             break;
         case tnfAbsoluteURIRecord:
             PrintAndLogEx(INFO, "Absolute URI Record");
-            PrintAndLogEx(NORMAL, "\ttype:    %.*s", ndef->TypeLen, ndef->Type);
-            PrintAndLogEx(NORMAL, "\tpayload: %.*s", ndef->PayloadLen, ndef->Payload);
+            PrintAndLogEx(NORMAL, "\ttype:    %.*s", (int)ndef->TypeLen, ndef->Type);
+            PrintAndLogEx(NORMAL, "\tpayload: %.*s", (int)ndef->PayloadLen, ndef->Payload);
             break;
-        default:
+        case tnfEmptyRecord:
+        case tnfMIMEMediaRecord:
+        case tnfExternalRecord:
+        case tnfUnchangedRecord:
+        case tnfUnknownRecord:
             break;
     }
     return 0;
 }
 
-int ndefRecordDecodeAndPrint(uint8_t *ndefRecord, size_t ndefRecordLen) {
+static int ndefRecordDecodeAndPrint(uint8_t *ndefRecord, size_t ndefRecordLen) {
     NDEFHeader_t NDEFHeader = {0};
     int res = ndefDecodeHeader(ndefRecord, ndefRecordLen, &NDEFHeader);
     if (res)
@@ -272,7 +283,7 @@ int ndefRecordDecodeAndPrint(uint8_t *ndefRecord, size_t ndefRecordLen) {
     return 0;
 }
 
-int ndefRecordsDecodeAndPrint(uint8_t *ndefRecord, size_t ndefRecordLen) {
+static int ndefRecordsDecodeAndPrint(uint8_t *ndefRecord, size_t ndefRecordLen) {
     bool firstRec = true;
     size_t len = 0;
 
@@ -291,7 +302,7 @@ int ndefRecordsDecodeAndPrint(uint8_t *ndefRecord, size_t ndefRecordLen) {
         }
 
         if (NDEFHeader.MessageEnd && len + NDEFHeader.RecLen != ndefRecordLen) {
-            PrintAndLogEx(ERR, "NDEF records have wrong length. Must be %d, calculated %d", ndefRecordLen, len + NDEFHeader.RecLen);
+            PrintAndLogEx(ERR, "NDEF records have wrong length. Must be %zu, calculated %zu", ndefRecordLen, len + NDEFHeader.RecLen);
             return 1;
         }
 
@@ -344,7 +355,6 @@ int NDEFDecodeAndPrint(uint8_t *ndef, size_t ndefLen, bool verbose) {
             case 0xfe: {
                 PrintAndLogEx(INFO, "-- NDEF Terminator. Done.");
                 return 0;
-                break;
             }
             default: {
                 PrintAndLogEx(ERR, "unknown tag 0x%02x", ndef[indx]);
@@ -352,6 +362,5 @@ int NDEFDecodeAndPrint(uint8_t *ndef, size_t ndefLen, bool verbose) {
             }
         }
     }
-
     return 0;
 }

@@ -18,14 +18,14 @@
 #endif
 
 #include "emv_pki.h"
-#include "crypto.h"
-#include "dump.h"
-#include "util.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+
+#include "crypto.h"
+#include "dump.h"
+#include "util.h"
 
 static bool strictExecution = true;
 void PKISetStrictExecution(bool se) {
@@ -332,7 +332,7 @@ unsigned char *emv_pki_sdatl_fill(const struct tlvdb *db, size_t *sdatl_len) {
     *sdatl_len = 0;
 
     const struct tlv *sda_tl = tlvdb_get(db, 0x9f4a, NULL);
-    if (!sda_tl || sda_tl->len <= 0)
+    if (!sda_tl || sda_tl->len == 0)
         return NULL;
 
     for (int i = 0; i < sda_tl->len; i++) {

@@ -10,6 +10,9 @@
 //-----------------------------------------------------------------------------
 #include "BigBuf.h"
 
+#include "string.h"
+#include "dbprint.h"
+
 // BigBuf is the large multi-purpose buffer, typically used to hold A/D samples or traces.
 // Also used to hold various smaller buffers and the Mifare Emulator Memory.
 // declare it as uint32_t to achieve alignment to 4 Byte boundary
@@ -96,10 +99,10 @@ void BigBuf_free_keep_EM(void) {
 }
 
 void BigBuf_print_status(void) {
-    Dbprintf("Memory");
+    DbpString(_BLUE_("Memory"));
     Dbprintf("  BIGBUF_SIZE.............%d", BIGBUF_SIZE);
     Dbprintf("  Available memory........%d", BigBuf_hi);
-    Dbprintf("Tracing");
+    DbpString(_BLUE_("Tracing"));
     Dbprintf("  tracing ................%d", tracing);
     Dbprintf("  traceLen ...............%d", traceLen);
 }
@@ -112,9 +115,11 @@ uint16_t BigBuf_max_traceLen(void) {
 void clear_trace(void) {
     traceLen = 0;
 }
+
 void set_tracelen(uint32_t value) {
     traceLen = value;
 }
+
 void set_tracing(bool enable) {
     tracing = enable;
 }

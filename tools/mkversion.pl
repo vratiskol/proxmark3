@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl -w
 
 # Output a version.c file that includes information about the current build
 # Normally a couple of lines of bash would be enough (see openpcd project, original firmware by Harald Welte and Milosch Meriac)
@@ -14,7 +14,7 @@ $ENV{'LC_ALL'} = "C";
 $ENV{'LANG'} = "C";
 
 # if you are making your own fork,  change this line to reflect your fork-name
-my $fullgitinfo = 'iceman';
+my $fullgitinfo = 'RRG/Iceman';
 my $ctime;
 # GIT status  0 = dirty,  1 = clean ,  2 = undecided
 my $clean = 2;
@@ -32,7 +32,8 @@ my $commandGIT = "env which git";
 
 if ( defined($commandGIT) )  {
 
-    my $githistory = `git fetch --all`;
+    # this goes on Internet and cause major slowdowns on poor connections or intranets, let's comment it
+    #my $githistory = `git fetch --all`;
     # now avoiding the "fatal: No names found, cannot describe anything." error by fallbacking to abbrev hash in such case
     my $gitversion = `git describe --dirty --always`;
     my $gitbranch = `git rev-parse --abbrev-ref HEAD`;
@@ -63,7 +64,7 @@ $fullgitinfo =~ s/(\s)//g;
 $fullgitinfo = substr $fullgitinfo, 0, 49;
 
 print <<EOF
-#include "proxmark3.h"
+#include "proxmark3_arm.h"
 /* Generated file, do not edit */
 const struct version_information __attribute__((section(".version_information"))) version_information = {
     VERSION_INFORMATION_MAGIC,

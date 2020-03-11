@@ -11,7 +11,9 @@
 //
 
 #include "cbortools.h"
-#include <stdlib.h>
+
+#include <inttypes.h>
+
 #include "emv/emvjson.h"
 #include "util.h"
 #include "fidocore.h"
@@ -73,9 +75,9 @@ static CborError dumpelm(CborValue *it, bool *got_next, int nestingLevel) {
         }
 
         case CborSimpleType: {
-            uint8_t type;
-            cbor_value_get_simple_type(it, &type);
-            printf("simple(%u)", type);
+            uint8_t t;
+            cbor_value_get_simple_type(it, &t);
+            printf("simple(%u)", t);
             break;
         }
 
@@ -161,7 +163,7 @@ static CborError dumprecursive(uint8_t cmdCode, bool isResponse, CborValue *it, 
                 if (cmdCode > 0 && nestingLevel == 1 && isMapType && !(elmCount % 2)) {
                     int64_t val;
                     cbor_value_get_int64(it, &val);
-                    char *desc = fido2GetCmdMemberDescription(cmdCode, isResponse, val);
+                    const char *desc = fido2GetCmdMemberDescription(cmdCode, isResponse, val);
                     if (desc)
                         printf(" (%s)", desc);
                 }
@@ -184,7 +186,7 @@ static CborError dumprecursive(uint8_t cmdCode, bool isResponse, CborValue *it, 
     return CborNoError;
 }
 
-int TinyCborInit(uint8_t *data, size_t length, CborValue *cb) {
+static int TinyCborInit(uint8_t *data, size_t length, CborValue *cb) {
     CborParser parser;
     CborError err = cbor_parser_init(data, length, 0, &parser, cb);
     if (err)
@@ -204,19 +206,17 @@ int TinyCborPrintFIDOPackage(uint8_t cmdCode, bool isResponse, uint8_t *data, si
 
     if (err) {
         fprintf(stderr,
-#if __WORDSIZE == 64
-                "CBOR parsing failure at offset %" PRId64 " : %s\n",
-#else
-                "CBOR parsing failure at offset %" PRId32 " : %s\n",
-#endif
-                cb.ptr - data, cbor_error_string(err));
+                "CBOR parsing failure at offset %" PRIu32 " : %s\n",
+                (uint32_t)(cb.ptr - data),
+                cbor_error_string(err)
+               );
         return 1;
     }
 
     return 0;
 }
 
-int JsonObjElmCount(json_t *elm) {
+static int JsonObjElmCount(json_t *elm) {
     int res = 0;
     const char *key;
     json_t *value;
@@ -357,7 +357,7 @@ CborError CborGetArrayBinStringValue(CborValue *elm, uint8_t *data, size_t maxda
     return CborGetArrayBinStringValueEx(elm, data, maxdatalen, datalen, NULL, 0);
 }
 
-CborError CborGetArrayBinStringValueEx(CborValue *elm, uint8_t *data, size_t maxdatalen, size_t *datalen, uint8_t *delimeter, size_t delimeterlen) {
+CborError CborGetArrayBinStringValueEx(CborValue *elm, uint8_t *data, size_t maxdatalen, size_t *datalen, uint8_t *delimiter, size_t delimiterlen) {
     CborValue array;
     if (datalen)
         *datalen = 0;
@@ -373,9 +373,9 @@ CborError CborGetArrayBinStringValueEx(CborValue *elm, uint8_t *data, size_t max
         cbor_check(res);
 
         totallen += slen;
-        if (delimeter) {
-            memcpy(&data[totallen], delimeter, delimeterlen);
-            totallen += delimeterlen;
+        if (delimiter) {
+            memcpy(&data[totallen], delimiter, delimiterlen);
+            totallen += delimiterlen;
         }
         slen = maxdatalen - totallen;
     }
@@ -404,7 +404,7 @@ CborError CborGetBinStringValue(CborValue *elm, uint8_t *data, size_t maxdatalen
     return CborNoError;
 };
 
-CborError CborGetArrayStringValue(CborValue *elm, char *data, size_t maxdatalen, size_t *datalen, char *delimeter) {
+CborError CborGetArrayStringValue(CborValue *elm, char *data, size_t maxdatalen, size_t *datalen, char *delimiter) {
     CborValue array;
     if (datalen)
         *datalen = 0;
@@ -420,9 +420,9 @@ CborError CborGetArrayStringValue(CborValue *elm, char *data, size_t maxdatalen,
         cbor_check(res);
 
         totallen += slen;
-        if (delimeter) {
-            strcat(data, delimeter);
-            totallen += strlen(delimeter);
+        if (delimiter) {
+            strcat(data, delimiter);
+            totallen += strlen(delimiter);
         }
         slen = maxdatalen - totallen;
         data[totallen] = 0x00;
@@ -459,7 +459,7 @@ CborError CborGetStringValueBuf(CborValue *elm) {
     return CborGetStringValue(elm, stringBuf, sizeof(stringBuf), NULL);
 };
 
-int CBOREncodeElm(json_t *root, char *rootElmId, CborEncoder *encoder) {
+int CBOREncodeElm(json_t *root, const char *rootElmId, CborEncoder *encoder) {
     json_t *elm = NULL;
     if (rootElmId && strlen(rootElmId) && rootElmId[0] == '$')
         elm = json_path_get(root, rootElmId);

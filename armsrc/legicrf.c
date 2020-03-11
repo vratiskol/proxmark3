@@ -11,10 +11,19 @@
 //-----------------------------------------------------------------------------
 #include "legicrf.h"
 
-#include "ticks.h"              /* timers */
 #include "crc.h"                /* legic crc-4 */
 #include "legic_prng.h"         /* legic PRNG impl */
 #include "legic.h"              /* legic_card_select_t struct */
+
+#include "proxmark3_arm.h"
+#include "cmd.h"
+#include "BigBuf.h"
+#include "fpgaloader.h"
+#include "ticks.h"
+#include "dbprint.h"
+#include "util.h"
+#include "string.h"
+#include "protocols.h"
 
 static uint8_t *legic_mem;      /* card memory, used for read, write */
 static legic_card_select_t card;/* metadata of currently selected card */
@@ -402,7 +411,7 @@ void LegicRfInfo(void) {
     // establish shared secret and detect card type
     uint8_t card_type = setup_phase(0x01);
     if (init_card(card_type, &card) != 0) {
-        cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+        reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
         goto OUT;
     }
 
@@ -410,7 +419,7 @@ void LegicRfInfo(void) {
     for (uint8_t i = 0; i < sizeof(card.uid); ++i) {
         int16_t byte = read_byte(i, card.cmdsize);
         if (byte == -1) {
-            cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+            reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
             goto OUT;
         }
         card.uid[i] = byte & 0xFF;
@@ -420,12 +429,12 @@ void LegicRfInfo(void) {
     int16_t mcc = read_byte(4, card.cmdsize);
     int16_t calc_mcc = CRC8Legic(card.uid, 4);;
     if (mcc != calc_mcc) {
-        cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+        reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
         goto OUT;
     }
 
     // OK
-    cmd_send(CMD_ACK, 1, 0, 0, (uint8_t *)&card, sizeof(legic_card_select_t));
+    reply_old(CMD_ACK, 1, 0, 0, (uint8_t *)&card, sizeof(legic_card_select_t));
 
 OUT:
     switch_off();
@@ -439,7 +448,7 @@ void LegicRfReader(uint16_t offset, uint16_t len, uint8_t iv) {
     // establish shared secret and detect card type
     uint8_t card_type = setup_phase(iv);
     if (init_card(card_type, &card) != 0) {
-        cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+        reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
         goto OUT;
     }
 
@@ -451,14 +460,14 @@ void LegicRfReader(uint16_t offset, uint16_t len, uint8_t iv) {
     for (uint16_t i = 0; i < len; ++i) {
         int16_t byte = read_byte(offset + i, card.cmdsize);
         if (byte == -1) {
-            cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+            reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
             goto OUT;
         }
         legic_mem[i] = byte;
     }
 
     // OK
-    cmd_send(CMD_ACK, 1, len, 0, legic_mem, len);
+    reply_old(CMD_ACK, 1, len, 0, legic_mem, len);
 
 OUT:
     switch_off();
@@ -471,14 +480,14 @@ void LegicRfWriter(uint16_t offset, uint16_t len, uint8_t iv, uint8_t *data) {
 
     // uid is not writeable
     if (offset <= WRITE_LOWERLIMIT) {
-        cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+        reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
         goto OUT;
     }
 
     // establish shared secret and detect card type
     uint8_t card_type = setup_phase(iv);
     if (init_card(card_type, &card) != 0) {
-        cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+        reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
         goto OUT;
     }
 
@@ -491,13 +500,13 @@ void LegicRfWriter(uint16_t offset, uint16_t len, uint8_t iv, uint8_t *data) {
     while (len-- > 0 && !BUTTON_PRESS()) {
         if (!write_byte(len + offset, data[len], card.addrsize)) {
             Dbprintf("operation failed | %02X | %02X | %02X", len + offset, len, data[len]);
-            cmd_send(CMD_ACK, 0, 0, 0, 0, 0);
+            reply_mix(CMD_ACK, 0, 0, 0, 0, 0);
             goto OUT;
         }
     }
 
     // OK
-    cmd_send(CMD_ACK, 1, len, 0, legic_mem, len);
+    reply_old(CMD_ACK, 1, len, 0, legic_mem, len);
 
 OUT:
     switch_off();

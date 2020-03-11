@@ -12,6 +12,16 @@
 //-----------------------------------------------------------------------------
 #include "epa.h"
 
+#include "cmd.h"
+#include "fpgaloader.h"
+#include "iso14443a.h"
+#include "iso14443b.h"
+#include "string.h"
+#include "util.h"
+#include "dbprint.h"
+#include "commonutil.h"
+#include "ticks.h"
+
 // Protocol and Parameter Selection Request for ISO 14443 type A cards
 // use regular (1x) speed in both directions
 // CRC is already included
@@ -129,8 +139,8 @@ void EPA_Finish() {
 //-----------------------------------------------------------------------------
 // Parses DER encoded data, e.g. from EF.CardAccess and fills out the given
 // structs. If a pointer is 0, it is ignored.
-// The function returns 0 on success and if an error occured, it returns the
-// offset where it occured.
+// The function returns 0 on success and if an error occurred, it returns the
+// offset where it occurred.
 //
 // TODO: This function can access memory outside of the given data if the DER
 //       encoding is broken
@@ -253,18 +263,18 @@ static void EPA_PACE_Collect_Nonce_Abort(uint8_t step, int func_return) {
     EPA_Finish();
 
     // send the USB packet
-    cmd_send(CMD_ACK, step, func_return, 0, 0, 0);
+    reply_old(CMD_ACK, step, func_return, 0, 0, 0);
 }
 
 //-----------------------------------------------------------------------------
 // Acquire one encrypted PACE nonce
 //-----------------------------------------------------------------------------
-void EPA_PACE_Collect_Nonce(UsbCommand *c) {
+void EPA_PACE_Collect_Nonce(PacketCommandNG *c) {
     /*
      * ack layout:
      *   arg:
      *       1. element
-     *           step where the error occured or 0 if no error occured
+     *           step where the error occurred or 0 if no error occurred
      *       2. element
      *           return code of the last executed function
      *   d:
@@ -313,7 +323,7 @@ void EPA_PACE_Collect_Nonce(UsbCommand *c) {
 
     // now get the nonce
     uint8_t nonce[256] = {0};
-    uint8_t requested_size = (uint8_t)c->arg[0];
+    uint8_t requested_size = (uint8_t)c->oldarg[0];
     func_return = EPA_PACE_Get_Nonce(requested_size, nonce);
     // check if the command succeeded
     if (func_return < 0) {
@@ -325,7 +335,7 @@ void EPA_PACE_Collect_Nonce(UsbCommand *c) {
     EPA_Finish();
 
     // save received information
-    cmd_send(CMD_ACK, 0, func_return, 0, nonce, func_return);
+    reply_old(CMD_ACK, 0, func_return, 0, nonce, func_return);
 }
 
 //-----------------------------------------------------------------------------
@@ -430,25 +440,25 @@ int EPA_PACE_MSE_Set_AT(pace_version_info_t pace_version_info, uint8_t password)
 //-----------------------------------------------------------------------------
 // Perform the PACE protocol by replaying given APDUs
 //-----------------------------------------------------------------------------
-void EPA_PACE_Replay(UsbCommand *c) {
-    uint32_t timings[sizeof(apdu_lengths_replay) / sizeof(apdu_lengths_replay[0])] = {0};
+void EPA_PACE_Replay(PacketCommandNG *c) {
+    uint32_t timings[ARRAYLEN(apdu_lengths_replay)] = {0};
 
     // if an APDU has been passed, save it
-    if (c->arg[0] != 0) {
+    if (c->oldarg[0] != 0) {
         // make sure it's not too big
-        if (c->arg[2] > apdus_replay[c->arg[0] - 1].len) {
-            cmd_send(CMD_ACK, 1, 0, 0, NULL, 0);
+        if (c->oldarg[2] > apdus_replay[c->oldarg[0] - 1].len) {
+            reply_old(CMD_ACK, 1, 0, 0, NULL, 0);
         }
-        memcpy(apdus_replay[c->arg[0] - 1].data + c->arg[1],
-               c->d.asBytes,
-               c->arg[2]);
+        memcpy(apdus_replay[c->oldarg[0] - 1].data + c->oldarg[1],
+               c->data.asBytes,
+               c->oldarg[2]);
         // save/update APDU length
-        if (c->arg[1] == 0) {
-            apdu_lengths_replay[c->arg[0] - 1] = c->arg[2];
+        if (c->oldarg[1] == 0) {
+            apdu_lengths_replay[c->oldarg[0] - 1] = c->oldarg[2];
         } else {
-            apdu_lengths_replay[c->arg[0] - 1] += c->arg[2];
+            apdu_lengths_replay[c->oldarg[0] - 1] += c->oldarg[2];
         }
-        cmd_send(CMD_ACK, 0, 0, 0, NULL, 0);
+        reply_old(CMD_ACK, 0, 0, 0, NULL, 0);
         return;
     }
 
@@ -459,7 +469,7 @@ void EPA_PACE_Replay(UsbCommand *c) {
     func_return = EPA_Setup();
     if (func_return != 0) {
         EPA_Finish();
-        cmd_send(CMD_ACK, 2, func_return, 0, NULL, 0);
+        reply_old(CMD_ACK, 2, func_return, 0, NULL, 0);
         return;
     }
 
@@ -470,24 +480,24 @@ void EPA_PACE_Replay(UsbCommand *c) {
     uint8_t response_apdu[300] = {0};
 
     // now replay the data and measure the timings
-    for (int i = 0; i < sizeof(apdu_lengths_replay); i++) {
+    for (int i = 0; i < ARRAYLEN(apdu_lengths_replay); i++) {
         StartCountUS();
         func_return = EPA_APDU(apdus_replay[i].data,
                                apdu_lengths_replay[i],
                                response_apdu);
         timings[i] = GetCountUS();
         // every step but the last one should succeed
-        if (i < sizeof(apdu_lengths_replay) - 1
+        if (i < ARRAYLEN(apdu_lengths_replay) - 1
                 && (func_return < 6
                     || response_apdu[func_return - 4] != 0x90
                     || response_apdu[func_return - 3] != 0x00)) {
             EPA_Finish();
-            cmd_send(CMD_ACK, 3 + i, func_return, 0, timings, 20);
+            reply_old(CMD_ACK, 3 + i, func_return, 0, timings, 20);
             return;
         }
     }
     EPA_Finish();
-    cmd_send(CMD_ACK, 0, 0, 0, timings, 20);
+    reply_old(CMD_ACK, 0, 0, 0, timings, 20);
     return;
 }
 
@@ -496,19 +506,17 @@ void EPA_PACE_Replay(UsbCommand *c) {
 // Returns 0 on success or a non-zero error code on failure
 //-----------------------------------------------------------------------------
 int EPA_Setup() {
-    int return_code = 0;
     uint8_t uid[10];
-    uint8_t pps_response[3];
-    uint8_t pps_response_par[1];
     iso14a_card_select_t card_a_info;
-    iso14b_card_select_t card_b_info;
 
     // first, look for type A cards
     // power up the field
     iso14443a_setup(FPGA_HF_ISO14443A_READER_MOD);
     // select the card
-    return_code = iso14443a_select_card(uid, &card_a_info, NULL, true, 0, false);
+    int return_code = iso14443a_select_card(uid, &card_a_info, NULL, true, 0, false);
     if (return_code == 1) {
+        uint8_t pps_response[3];
+        uint8_t pps_response_par[1];
         // send the PPS request
         ReaderTransmit((uint8_t *)pps, sizeof(pps), NULL);
         return_code = ReaderReceive(pps_response, pps_response_par);
@@ -523,6 +531,7 @@ int EPA_Setup() {
     // if we're here, there is no type A card, so we look for type B
     // power up the field
     iso14443b_setup();
+    iso14b_card_select_t card_b_info;
     // select the card
     return_code = iso14443b_select_card(&card_b_info);
     if (return_code == 0) {

@@ -10,22 +10,9 @@
 #ifndef __MIFARE_HOST_H
 #define __MIFARE_HOST_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <pthread.h>
-
-#include "proxmark3.h"  // time_t
 #include "common.h"
+
 #include "util.h"       // FILE_PATH_SIZE
-#include "ui.h"         // PrintAndLog...
-#include "crapto1/crapto1.h"
-#include "crc16.h"
-#include "protocols.h"
-#include "mifare.h"
-#include "mfkey.h"
-#include "util_posix.h"  // msclock
 
 #define MIFARE_SECTOR_RETRY     10
 
@@ -52,7 +39,7 @@ typedef struct {
     uint32_t uid;
     uint32_t blockNo;
     uint32_t keyType;
-    uint32_t nt;
+    uint32_t nt_enc;
     uint32_t ks1;
 } StateList_t;
 
@@ -68,36 +55,45 @@ typedef struct {
 } icesector_t;
 
 extern char logHexFileName[FILE_PATH_SIZE];
+#define KEYS_IN_BLOCK   ((PM3_CMD_DATA_SIZE - 4) / 6)
+#define KEYBLOCK_SIZE   (KEYS_IN_BLOCK * 6)
+#define CANDIDATE_SIZE  (0xFFFF * 6)
 
-extern int mfDarkside(uint8_t blockno, uint8_t key_type, uint64_t *key);
-extern int mfnested(uint8_t blockNo, uint8_t keyType, uint8_t *key, uint8_t trgBlockNo, uint8_t trgKeyType, uint8_t *ResultKeys, bool calibrate);
-extern int mfCheckKeys(uint8_t blockNo, uint8_t keyType, bool clear_trace, uint8_t keycnt, uint8_t *keyBlock, uint64_t *key);
-extern int mfCheckKeys_fast(uint8_t sectorsCnt, uint8_t firstChunk, uint8_t lastChunk,
-                            uint8_t strategy, uint32_t size, uint8_t *keyBlock, sector_t *e_sector, bool use_flashmemory);
-extern int mfKeyBrute(uint8_t blockNo, uint8_t keyType, uint8_t *key, uint64_t *resultkey);
+int mfDarkside(uint8_t blockno, uint8_t key_type, uint64_t *key);
+int mfnested(uint8_t blockNo, uint8_t keyType, uint8_t *key, uint8_t trgBlockNo, uint8_t trgKeyType, uint8_t *resultKey, bool calibrate);
+int mfStaticNested(uint8_t blockNo, uint8_t keyType, uint8_t *key, uint8_t trgBlockNo, uint8_t trgKeyType, uint8_t *resultKey);
+int mfCheckKeys(uint8_t blockNo, uint8_t keyType, bool clear_trace, uint8_t keycnt, uint8_t *keyBlock, uint64_t *key);
+int mfCheckKeys_fast(uint8_t sectorsCnt, uint8_t firstChunk, uint8_t lastChunk,
+                     uint8_t strategy, uint32_t size, uint8_t *keyBlock, sector_t *e_sector, bool use_flashmemory);
 
-extern int mfReadSector(uint8_t sectorNo, uint8_t keyType, uint8_t *key, uint8_t *data);
+int mfCheckKeys_file(uint8_t *destfn, uint64_t *key);
 
-extern int mfEmlGetMem(uint8_t *data, int blockNum, int blocksCount);
-extern int mfEmlSetMem(uint8_t *data, int blockNum, int blocksCount);
-extern int mfEmlSetMem_xt(uint8_t *data, int blockNum, int blocksCount, int blockBtWidth);
+int mfKeyBrute(uint8_t blockNo, uint8_t keyType, uint8_t *key, uint64_t *resultkey);
 
-extern int mfCSetUID(uint8_t *uid, uint8_t *atqa, uint8_t *sak, uint8_t *oldUID, uint8_t wipecard);
-extern int mfCSetBlock(uint8_t blockNo, uint8_t *data, uint8_t *uid, uint8_t params);
-extern int mfCGetBlock(uint8_t blockNo, uint8_t *data, uint8_t params);
+int mfReadSector(uint8_t sectorNo, uint8_t keyType, uint8_t *key, uint8_t *data);
 
-extern int mfTraceInit(uint8_t *tuid, uint8_t uidlen, uint8_t *atqa, uint8_t sak, bool wantSaveToEmlFile);
-extern int mfTraceDecode(uint8_t *data_src, int len, bool wantSaveToEmlFile);
+int mfEmlGetMem(uint8_t *data, int blockNum, int blocksCount);
+int mfEmlSetMem(uint8_t *data, int blockNum, int blocksCount);
+int mfEmlSetMem_xt(uint8_t *data, int blockNum, int blocksCount, int blockBtWidth);
 
-extern int isTraceCardEmpty(void);
-extern int isBlockEmpty(int blockN);
-extern int isBlockTrailer(int blockN);
-extern int loadTraceCard(uint8_t *tuid, uint8_t uidlen);
-extern int saveTraceCard(void);
-extern int tryDecryptWord(uint32_t nt, uint32_t ar_enc, uint32_t at_enc, uint8_t *data, int len);
+int mfCSetUID(uint8_t *uid, uint8_t *atqa, uint8_t *sak, uint8_t *oldUID, uint8_t wipecard);
+int mfCWipe(uint8_t *uid, uint8_t *atqa, uint8_t *sak);
+int mfCSetBlock(uint8_t blockNo, uint8_t *data, uint8_t *uid, uint8_t params);
+int mfCGetBlock(uint8_t blockNo, uint8_t *data, uint8_t params);
 
-extern int detect_classic_prng(void);
-extern int detect_classic_nackbug(bool verbose);
-extern void detect_classic_magic(void);
-extern void mf_crypto1_decrypt(struct Crypto1State *pcs, uint8_t *data, int len, bool isEncrypted);
+int mfTraceInit(uint8_t *tuid, uint8_t uidlen, uint8_t *atqa, uint8_t sak, bool wantSaveToEmlFile);
+int mfTraceDecode(uint8_t *data_src, int len, bool wantSaveToEmlFile);
+
+int isTraceCardEmpty(void);
+int isBlockEmpty(int blockN);
+int isBlockTrailer(int blockN);
+int loadTraceCard(uint8_t *tuid, uint8_t uidlen);
+int saveTraceCard(void);
+int tryDecryptWord(uint32_t nt, uint32_t ar_enc, uint32_t at_enc, uint8_t *data, int len);
+
+int detect_classic_prng(void);
+int detect_classic_nackbug(bool verbose);
+void detect_classic_magic(void);
+int detect_classic_static_nonce(void);
+void mf_crypto1_decrypt(struct Crypto1State *pcs, uint8_t *data, int len, bool isEncrypted);
 #endif

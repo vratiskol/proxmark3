@@ -17,6 +17,8 @@
 #include <config.h>
 #endif
 
+#include "commonutil.h"  // ARRAYLEN
+
 #include "../crypto.h"
 #include "../dump.h"
 #include "util_posix.h"
@@ -24,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "crypto_test.h"
 
 static int test_genkey(unsigned int keylength, unsigned char *msg, size_t msg_len, bool verbose) {
     int ret = 1;
@@ -298,8 +301,9 @@ close_pub:
     return ret;
 }
 
-int exec_crypto_test(bool verbose) {
-    unsigned int keylengths[] = {1024, 1152, 1408, 1984, 2048, 3072, 4096};
+int exec_crypto_test(bool verbose, bool include_slow_tests) {
+    unsigned int keylengths[] = {1024, 2048};
+    unsigned int extra_keylengths[] = {1152, 1408, 1984, 3072, 4096};
     int i;
     int ret;
     fprintf(stdout, "\n");
@@ -311,14 +315,23 @@ int exec_crypto_test(bool verbose) {
     }
     fprintf(stdout, "Crypto raw test: passed\n\n");
 
-    for (i = 0; i < sizeof(keylengths) / sizeof(keylengths[0]); i++) {
+    for (i = 0; i < ARRAYLEN(keylengths); i++) {
         unsigned int kl = keylengths[i];
         ret = test_genkey(kl, message, kl / 8, verbose);
         if (ret) {
-            fprintf(stderr, "Crypto generate key[%d] test: failed\n", kl);
+            fprintf(stderr, "Crypto generate key[%u] test: failed\n", kl);
             return ret;
         }
     }
-
+    if (include_slow_tests) {
+        for (i = 0; i < ARRAYLEN(extra_keylengths); i++) {
+            unsigned int kl = extra_keylengths[i];
+            ret = test_genkey(kl, message, kl / 8, verbose);
+            if (ret) {
+                fprintf(stderr, "Crypto generate key[%u] test: failed\n", kl);
+                return ret;
+            }
+        }
+    }
     return 0;
 }

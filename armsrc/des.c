@@ -27,6 +27,7 @@
  */
 
 #include "des.h"
+#include "string.h"
 
 const uint8_t sbox[256]  = {
     /* S-box 1 */
@@ -208,9 +209,9 @@ void permute(const uint8_t *ptable, const uint8_t *in, uint8_t *out) {
     ob = ptable[1];
     ptable = &(ptable[2]);
     for (byte = 0; byte < ob; ++byte) {
-        uint8_t x, t = 0;
+        uint8_t t = 0;
         for (bit = 0; bit < 8; ++bit) {
-            x = *ptable++ - 1;
+            uint8_t x = *ptable++ - 1;
             t <<= 1;
             if ((in[x / 8]) & (0x80 >> (x % 8))) {
                 t |= 0x01;
@@ -271,7 +272,7 @@ uint8_t substitute(uint8_t a, uint8_t *sbp) {
 uint32_t des_f(uint32_t r, uint8_t *kr) {
     uint8_t i;
     uint32_t t = 0, ret;
-    uint64_t data;
+    uint64_t data = 0;
     uint8_t *sbp; /* sboxpointer */
     permute((uint8_t *)e_permtab, (uint8_t *)&r, (uint8_t *)&data);
     for (i = 0; i < 6; ++i)

@@ -35,6 +35,8 @@
  */
 #include "printf.h"
 
+#include "string.h"
+
 typedef unsigned char u_char;
 typedef unsigned int u_int;
 typedef unsigned long long u_quad_t;
@@ -60,12 +62,10 @@ char const hex2ascii_data[] = "0123456789abcdefghijklmnopqrstuvwxyz";
  */
 static char *
 ksprintn(char *nbuf, uintmax_t num, int base, int *lenp, int upper) {
-    char *p, c;
-
-    p = nbuf;
+    char *p = nbuf;
     *p = '\0';
     do {
-        c = hex2ascii(num % base);
+        char c = hex2ascii(num % base);
         *++p = upper ? toupper(c) : c;
     } while (num /= base);
     if (lenp)

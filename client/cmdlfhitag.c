@@ -8,27 +8,26 @@
 // Low frequency Hitag support
 //-----------------------------------------------------------------------------
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "proxmark3.h"
-#include "ui.h"
-#include "cmdparser.h"
-#include "common.h"
-#include "util.h"
-#include "parity.h"
-#include "hitag.h"
-#include "util_posix.h"
+#include "cmdlfhitag.h"
+
+#include <ctype.h>
+
+#include "cmdparser.h"    // command_t
 #include "comms.h"
-#include "cmddata.h"
-#include "loclass/fileutils.h"  // savefile
+#include "cmdtrace.h"
+#include "commonutil.h"
+#include "hitag.h"
+#include "fileutils.h"  // savefile
+#include "protocols.h"  // defines
 
 static int CmdHelp(const char *Cmd);
 
-size_t nbytes(size_t nbits) {
+/*
+static size_t nbytes(size_t nbits) {
     return (nbits / 8) + ((nbits % 8) > 0);
 }
-int usage_hitag_sniff(void) {
+*/
+static int usage_hitag_sniff(void) {
     PrintAndLogEx(NORMAL, "Sniff traffic between Hitag reader and tag. Use " _YELLOW_("`lf hitag list`")" to view collected data.");
     PrintAndLogEx(NORMAL, "Usage:   lf hitag sniff [h] ");
     PrintAndLogEx(NORMAL, "Options:");
@@ -37,9 +36,9 @@ int usage_hitag_sniff(void) {
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "         lf hitag sniff");
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_hitag_sim(void) {
+static int usage_hitag_sim(void) {
     PrintAndLogEx(NORMAL, "Simulate " _YELLOW_("Hitag2 / HitagS")" transponder");
     PrintAndLogEx(NORMAL, "Usage:   lf hitag sim [h] [2|s] e|j|b <filename w/o extension>");
     PrintAndLogEx(NORMAL, "Options:");
@@ -51,18 +50,19 @@ int usage_hitag_sim(void) {
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "         lf hitag sim 2 b lf-hitag-dump");
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_hitag_info(void) {
+static int usage_hitag_info(void) {
     PrintAndLogEx(NORMAL, "Usage:   lf hitag info [h] p <pwd>");
     PrintAndLogEx(NORMAL, "Options:");
     PrintAndLogEx(NORMAL, "       h          This help");
     PrintAndLogEx(NORMAL, "       p <pwd>    password");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "         lf hitag info");
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_hitag_dump(void) {
+/*
+static int usage_hitag_dump(void) {
     PrintAndLogEx(NORMAL, "Usage:   lf hitag dump [h] p <pwd> f <name>");
     PrintAndLogEx(NORMAL, "Options:");
     PrintAndLogEx(NORMAL, "       h          This help");
@@ -72,39 +72,44 @@ int usage_hitag_dump(void) {
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "         lf hitag dump f mydump");
     PrintAndLogEx(NORMAL, "         lf hitag dump p 4D494B52 f mydump");
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_hitag_reader(void) {
+*/
+static int usage_hitag_reader(void) {
     PrintAndLogEx(NORMAL, "Hitag reader functions");
     PrintAndLogEx(NORMAL, "Usage: lf hitag reader [h] <reader function #>");
     PrintAndLogEx(NORMAL, "Options:");
     PrintAndLogEx(NORMAL, "       h               This help");
     PrintAndLogEx(NORMAL, "   HitagS (0*)");
-    PrintAndLogEx(NORMAL, "      01 <nr> <ar>     Challenge, read all pages from a Hitag S tag");
-    PrintAndLogEx(NORMAL, "      02 <key>         Set to 0 if no authentication is needed. Read all pages from a Hitag S tag");
+    PrintAndLogEx(NORMAL, "      01 <nr> <ar>     Read all pages, challenge mode");
+    PrintAndLogEx(NORMAL, "      02 <key>         Read all pages, crypto mode. Set key=0 for no auth");
     PrintAndLogEx(NORMAL, "   Hitag1 (1*)");
+    PrintAndLogEx(NORMAL, "      Not implemented");
     PrintAndLogEx(NORMAL, "   Hitag2 (2*)");
-    PrintAndLogEx(NORMAL, "      21 <password>    Password mode");
-    PrintAndLogEx(NORMAL, "      22 <nr> <ar>     Authentication");
-    PrintAndLogEx(NORMAL, "      23 <key>         Authentication, key is in format: ISK high + ISK low");
+    PrintAndLogEx(NORMAL, "      21 <password>    Read all pages, password mode. Default: " _YELLOW_("4D494B52") "(\"MIKR\")");
+    PrintAndLogEx(NORMAL, "      22 <nr> <ar>     Read all pages, challenge mode");
+    PrintAndLogEx(NORMAL, "      23 <key>         Read all pages, crypto mode. Key format: ISK high + ISK low. Default: " _YELLOW_("4F4E4D494B52") "(\"ONMIKR\")");
     PrintAndLogEx(NORMAL, "      25               Test recorded authentications");
     PrintAndLogEx(NORMAL, "      26               Just read UID");
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_hitag_writer(void) {
+static int usage_hitag_writer(void) {
     PrintAndLogEx(NORMAL, "Hitag writer functions");
     PrintAndLogEx(NORMAL, "Usage: lf hitag write [h] <reader function #>");
     PrintAndLogEx(NORMAL, "Options:");
-    PrintAndLogEx(NORMAL, "       h          This help");
+    PrintAndLogEx(NORMAL, "       h                                     This help");
     PrintAndLogEx(NORMAL, "   HitagS (0*)");
-    PrintAndLogEx(NORMAL, "      03 <nr,ar> (Challenge) <page> <byte0...byte3> write page on a Hitag S tag");
-    PrintAndLogEx(NORMAL, "      04 <key> (set to 0 if no authentication is needed) <page> <byte0...byte3> write page on a Hitag S tag");
+    PrintAndLogEx(NORMAL, "      03 <nr,ar> <page> <byte0...byte3>      Write page, challenge mode");
+    PrintAndLogEx(NORMAL, "      04 <key> <page> <byte0...byte3>        Write page, crypto mode. Set key=0 for no auth");
     PrintAndLogEx(NORMAL, "   Hitag1 (1*)");
+    PrintAndLogEx(NORMAL, "      Not implemented");
     PrintAndLogEx(NORMAL, "   Hitag2 (2*)");
-    PrintAndLogEx(NORMAL, "      24  <key> (set to 0 if no authentication is needed) <page> <byte0...byte3> write page on a Hitag2 tag");
-    return 0;
+    PrintAndLogEx(NORMAL, "      24  <key> <page> <byte0...byte3>       Write page, crypto mode. Key format: ISK high + ISK low.");
+    PrintAndLogEx(NORMAL, "                                             Default: 4F4E4D494B52 (\"ONMIKR\"). Set key=0 for no auth");
+    PrintAndLogEx(NORMAL, "      27  <password> <page> <byte0...byte3>  Write page, password mode. Default: 4D494B52 (\"MIKR\")");
+    return PM3_SUCCESS;
 }
-int usage_hitag_checkchallenges(void) {
+static int usage_hitag_checkchallenges(void) {
     PrintAndLogEx(NORMAL, "Check challenges, load a file with save hitag crypto challenges and test them all.");
     PrintAndLogEx(NORMAL, "The file should be 8 * 60 bytes long,  the file extension defaults to " _YELLOW_("`.cc`"));
     PrintAndLogEx(NORMAL, "");
@@ -115,41 +120,42 @@ int usage_hitag_checkchallenges(void) {
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "         lf hitag cc f lf-hitag-challenges");
-    return 0;
+    return PM3_SUCCESS;
 }
 
-int CmdLFHitagList(const char *Cmd) {
-    CmdTraceList("hitag");
-    return 0;
+static int CmdLFHitagList(const char *Cmd) {
+    (void)Cmd; // Cmd is not used so far
+    CmdTraceList("hitag2");
+    return PM3_SUCCESS;
 
     /*
-    uint8_t *got = calloc(USB_CMD_DATA_SIZE, sizeof(uint8_t));
+    uint8_t *got = calloc(PM3_CMD_DATA_SIZE, sizeof(uint8_t));
     if (!got) {
         PrintAndLogEx(WARNING, "Cannot allocate memory for trace");
-        return 2;
+        return PM3_EMALLOC;
     }
 
     // Query for the actual size of the trace
-    UsbCommand response;
-    if (!GetFromDevice(BIG_BUF, got, USB_CMD_DATA_SIZE, 0, &response, 2500, false)) {
+    PacketResponseNG response;
+    if (!GetFromDevice(BIG_BUF, got, PM3_CMD_DATA_SIZE, 0, NULL, 0, &response, 2500, false)) {
         PrintAndLogEx(WARNING, "command execution time out");
         free(got);
-        return 2;
+        return PM3_ETIMEOUT;
     }
 
     uint16_t traceLen = response.arg[2];
-    if (traceLen > USB_CMD_DATA_SIZE) {
+    if (traceLen > PM3_CMD_DATA_SIZE) {
         uint8_t *p = realloc(got, traceLen);
         if (p == NULL) {
             PrintAndLogEx(WARNING, "Cannot allocate memory for trace");
             free(got);
-            return 2;
+            return PM3_EMALLOC;
         }
         got = p;
-        if (!GetFromDevice(BIG_BUF, got, traceLen, 0, NULL, 2500, false)) {
+        if (!GetFromDevice(BIG_BUF, got, traceLen, 0, NULL, 0, NULL, 2500, false)) {
             PrintAndLogEx(WARNING, "command execution time out");
             free(got);
-            return 2;
+            return PM3_ETIMEOUT;
         }
     }
 
@@ -171,8 +177,8 @@ int CmdLFHitagList(const char *Cmd) {
     if (strlen(filename) > 0) {
         f = fopen(filename, "wb");
         if (!f) {
-            PrintAndLogEx(WARNING, "Error: Could not open file [%s]", filename);
-            return 1;
+            PrintAndLogEx(ERR, "Error: Could not open file [%s]", filename);
+            return PM3_EFILE;
         }
     }
 
@@ -242,26 +248,25 @@ int CmdLFHitagList(const char *Cmd) {
 
     if (f) {
         fclose(f);
-        PrintAndLogEx(NORMAL, "Recorded activity succesfully written to file: %s", filename);
+        PrintAndLogEx(NORMAL, "Recorded activity successfully written to file: %s", filename);
     }
 
     free(got);
-    return 0;
+    return PM3_SUCCES;
     */
 }
 
-int CmdLFHitagSniff(const char *Cmd) {
+static int CmdLFHitagSniff(const char *Cmd) {
 
     char ctmp = tolower(param_getchar(Cmd, 0));
     if (ctmp == 'h') return usage_hitag_sniff();
 
-    UsbCommand c = {CMD_SNIFF_HITAG, {0, 0, 0}};
     clearCommandBuffer();
-    SendCommand(&c);
-    return 0;
+    SendCommandNG(CMD_LF_HITAG_SNIFF, NULL, 0);
+    return PM3_SUCCESS;
 }
 
-int CmdLFHitagSim(const char *Cmd) {
+static int CmdLFHitagSim(const char *Cmd) {
 
     bool errors = false;
     bool tag_mem_supplied = false;
@@ -272,8 +277,7 @@ int CmdLFHitagSim(const char *Cmd) {
     int res = 0;
     char filename[FILE_PATH_SIZE] = { 0x00 };
 
-    UsbCommand c = {CMD_SIMULATE_HITAG, {0, 0, 0}};
-
+    uint16_t cmd = CMD_LF_HITAG_SIMULATE;
     while (param_getchar(Cmd, cmdp) != 0x00 && !errors) {
         switch (tolower(param_getchar(Cmd, cmdp))) {
             case 'h':
@@ -284,15 +288,15 @@ int CmdLFHitagSim(const char *Cmd) {
                 cmdp++;
                 break;
             case 's':
-                c.cmd = CMD_SIMULATE_HITAG_S;
+                cmd = CMD_LF_HITAGS_SIMULATE;
                 maxdatalen = 4 * 64;
                 cmdp++;
                 break;
             case 'e':
                 param_getstr(Cmd, cmdp + 1, filename, sizeof(filename));
-                res = loadFileEML(filename, "eml", data, &datalen);
+                res = loadFileEML(filename, data, &datalen);
                 if (res > 0 || datalen != maxdatalen) {
-                    PrintAndLogDevice(FAILED, "error, bytes read mismatch file size");
+                    PrintAndLogEx(FAILED, "error, bytes read mismatch file size");
                     errors = true;
                     break;
                 }
@@ -301,7 +305,7 @@ int CmdLFHitagSim(const char *Cmd) {
                 break;
             case 'j':
                 param_getstr(Cmd, cmdp + 1, filename, sizeof(filename));
-                res = loadFileJSON(filename, "json", data, maxdatalen, &datalen);
+                res = loadFileJSON(filename, data, maxdatalen, &datalen);
                 if (res > 0) {
                     errors = true;
                     break;
@@ -311,7 +315,7 @@ int CmdLFHitagSim(const char *Cmd) {
                 break;
             case 'b':
                 param_getstr(Cmd, cmdp + 1, filename, sizeof(filename));
-                res = loadFile(filename, "bin", data, maxdatalen, &datalen);
+                res = loadFile(filename, ".bin", data, maxdatalen, &datalen);
                 if (res > 0) {
                     errors = true;
                     break;
@@ -332,35 +336,35 @@ int CmdLFHitagSim(const char *Cmd) {
         return usage_hitag_sim();
     }
 
-    c.arg[0] = (uint32_t)tag_mem_supplied;
-    if (tag_mem_supplied) {
-        memcpy(c.d.asBytes, data, datalen);
-    }
     clearCommandBuffer();
-    SendCommand(&c);
+    if (tag_mem_supplied) {
+        SendCommandOLD(cmd, 1, 0, 0, data, datalen);
+    } else {
+        SendCommandMIX(cmd, 0, 0, 0, NULL, 0);
+    }
 
     free(data);
-    return 0;
+    return PM3_SUCCESS;
 }
 
 static void printHitagConfiguration(uint8_t config) {
-    
+
     char msg[100];
     memset(msg, 0, sizeof(msg));
 
     char bits[9];
     char *bs = bits;
     for (uint8_t i = 0 ; i < 8 ; i++) {
-        snprintf(bs, sizeof(bits), "%d", (config >> (7 - i)) & 1);
+        snprintf(bs, sizeof(bits) - i, "%1d", (config >> (7 - i)) & 1);
         bs++;
     }
 
     PrintAndLogEx(INFO, "\n\nHitag2 tag information ");
     PrintAndLogEx(INFO, "------------------------------------");
-    
+
     //configuration byte
-    PrintAndLogEx(SUCCESS, "Config byte : %02X - %s", config, bits);    
-    
+    PrintAndLogEx(SUCCESS, "Config byte : 0x%02X [ %s ]", config, bits);
+
     // encoding
     strcat(msg, "Encoding    : ");
     if (config & 0x1) {
@@ -409,17 +413,17 @@ static void printHitagConfiguration(uint8_t config) {
     if (config & 0x10) {
         strcat(msg + strlen(msg), "read only");
     } else  {
-        strcat(msg + strlen(msg), _GREEN_("read write"));
+        strcat(msg + strlen(msg), _GREEN_("RW"));
     }
     PrintAndLogEx(SUCCESS, "%s", msg);
     memset(msg, 0, sizeof(msg));
 
     // page access
-    strcat(msg, "Page 4,5    : ");    
+    strcat(msg, "Page 4,5    : ");
     if (config & 0x20) {
         strcat(msg + strlen(msg), "read only");
     } else  {
-        strcat(msg + strlen(msg), _GREEN_("read write"));
+        strcat(msg + strlen(msg), _GREEN_("RW"));
     }
     PrintAndLogEx(SUCCESS, "%s", msg);
     memset(msg, 0, sizeof(msg));
@@ -429,7 +433,7 @@ static void printHitagConfiguration(uint8_t config) {
     if (config & 0x40) {
         strcat(msg + strlen(msg), "read only. Configuration byte and password tag " _RED_("FIXED / IRREVERSIBLE"));
     } else  {
-        strcat(msg + strlen(msg), _GREEN_("read write"));
+        strcat(msg + strlen(msg), _GREEN_("RW"));
     }
     PrintAndLogEx(SUCCESS, "%s", msg);
     memset(msg, 0, sizeof(msg));
@@ -445,96 +449,89 @@ static void printHitagConfiguration(uint8_t config) {
             strcat(msg + strlen(msg), "read only");
         }
     } else  {
-        strcat(msg, "Page 1,2    : " _GREEN_("read write"));
+        strcat(msg, "Page 1,2    : " _GREEN_("RW"));
     }
     PrintAndLogEx(SUCCESS, "%s", msg);
     PrintAndLogEx(INFO, "------------------------------------");
 }
 
 static bool getHitagUid(uint32_t *uid) {
-
-    UsbCommand c = {CMD_READER_HITAG, {RHT2F_UID_ONLY, 0, 0} };
+    hitag_data htd;
+    memset(&htd, 0, sizeof(htd));
     clearCommandBuffer();
-    SendCommand(&c);
-    UsbCommand resp;
+    SendCommandMIX(CMD_LF_HITAG_READER, RHT2F_UID_ONLY, 0, 0, &htd, sizeof(htd));
+    PacketResponseNG resp;
     if (!WaitForResponseTimeout(CMD_ACK, &resp, 2500)) {
         PrintAndLogEx(WARNING, "timeout while waiting for reply.");
         return false;
     }
 
-    if (resp.arg[0] == false) {
+    if (resp.oldarg[0] == false) {
         PrintAndLogEx(DEBUG, "DEBUG: Error - failed getting UID");
         return false;
     }
 
-    if ( uid )
-        *uid = bytes_to_num(resp.d.asBytes, 4);
-   
+    if (uid)
+        *uid = bytes_to_num(resp.data.asBytes, 4);
+
     return true;
 }
 
-int CmdLFHitagInfo(const char *Cmd) {
-    PrintAndLogEx(INFO, "Hitag2 tag information ");
-    PrintAndLogEx(INFO, "To be done!");
-    PrintAndLogEx(INFO, "------------------------------------");
-
+static int CmdLFHitagInfo(const char *Cmd) {
     char ctmp = tolower(param_getchar(Cmd, 0));
     if (ctmp == 'h') return usage_hitag_info();
-    
-    // pwd or key
 
     // read UID
     uint32_t uid = 0;
-    if ( getHitagUid( &uid ) == false ) 
-        return 1;
-    
-    PrintAndLogEx(SUCCESS, "UID: %08X", uid);
-    
+    if (getHitagUid(&uid) == false)
+        return PM3_ESOFT;
+
+    PrintAndLogEx(SUCCESS, "UID: " _YELLOW_("%08X"), uid);
+
     // how to detemine Hitag types?
-    
     // read block3,  get configuration byte.
 
     // common configurations.
-    printHitagConfiguration(0x06);
+    // printHitagConfiguration(0x06);
     //printHitagConfiguration( 0x0E );
     //printHitagConfiguration( 0x02 );
     //printHitagConfiguration( 0x00 );
     //printHitagConfiguration( 0x04 );
-    return 0;
+    return PM3_SUCCESS;
 }
 
-// TODO: iceman 
+// TODO: iceman
 // Hitag2 reader,  problem is that this command mixes up stuff.  So 26 give uid.  21 etc will also give you a memory dump !?
 //
-int CmdLFHitagReader(const char *Cmd) {
+static int CmdLFHitagReader(const char *Cmd) {
 
-    UsbCommand c = {CMD_READER_HITAG, {0, 0, 0} };
-    hitag_data *htd = (hitag_data *)c.d.asBytes;
+    uint16_t cmd = CMD_LF_HITAG_READER;
+    hitag_data htd;
     hitag_function htf = param_get32ex(Cmd, 0, 0, 10);
 
     switch (htf) {
         case RHTSF_CHALLENGE: {
-            c.cmd = CMD_READ_HITAG_S;
-            num_to_bytes(param_get32ex(Cmd, 1, 0, 16), 4, htd->auth.NrAr);
-            num_to_bytes(param_get32ex(Cmd, 2, 0, 16), 4, htd->auth.NrAr + 4);
+            cmd = CMD_LF_HITAGS_READ;
+            num_to_bytes(param_get32ex(Cmd, 1, 0, 16), 4, htd.auth.NrAr);
+            num_to_bytes(param_get32ex(Cmd, 2, 0, 16), 4, htd.auth.NrAr + 4);
             break;
         }
         case RHTSF_KEY: {
-            c.cmd = CMD_READ_HITAG_S;
-            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 6, htd->crypto.key);
+            cmd = CMD_LF_HITAGS_READ;
+            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 6, htd.crypto.key);
             break;
         }
         case RHT2F_PASSWORD: {
-            num_to_bytes(param_get32ex(Cmd, 1, 0, 16), 4, htd->pwd.password);
+            num_to_bytes(param_get32ex(Cmd, 1, 0, 16), 4, htd.pwd.password);
             break;
         }
         case RHT2F_AUTHENTICATE: {
-            num_to_bytes(param_get32ex(Cmd, 1, 0, 16), 4, htd->auth.NrAr);
-            num_to_bytes(param_get32ex(Cmd, 2, 0, 16), 4, htd->auth.NrAr + 4);
+            num_to_bytes(param_get32ex(Cmd, 1, 0, 16), 4, htd.auth.NrAr);
+            num_to_bytes(param_get32ex(Cmd, 2, 0, 16), 4, htd.auth.NrAr + 4);
             break;
         }
         case RHT2F_CRYPTO: {
-            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 6, htd->crypto.key);
+            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 6, htd.crypto.key);
             break;
         }
         case RHT2F_TEST_AUTH_ATTEMPTS: {
@@ -545,51 +542,40 @@ int CmdLFHitagReader(const char *Cmd) {
             // No additional parameters needed
             break;
         }
-        default: {
+        case WHTSF_CHALLENGE:
+        case WHTSF_KEY:
+        case WHT2F_CRYPTO:
+        default:
             return usage_hitag_reader();
-        }
     }
 
-    c.arg[0] = htf;
     clearCommandBuffer();
-    SendCommand(&c);
-    UsbCommand resp;
+    SendCommandMIX(cmd, htf, 0, 0, &htd, sizeof(htd));
+    PacketResponseNG resp;
     if (!WaitForResponseTimeout(CMD_ACK, &resp, 4000)) {
         PrintAndLogEx(WARNING, "timeout while waiting for reply.");
-        return 1;
+        return PM3_ETIMEOUT;
     }
 
-    if (resp.arg[0] == false) {
+    if (resp.oldarg[0] == false) {
         PrintAndLogEx(DEBUG, "DEBUG: Error - hitag failed");
-        return 1;
+        return PM3_ESOFT;
     }
 
-    uint32_t id = bytes_to_num(resp.d.asBytes, 4);
+    uint32_t id = bytes_to_num(resp.data.asBytes, 4);
+    uint8_t *data = resp.data.asBytes;
+    PrintAndLogEx(SUCCESS, " UID: " _YELLOW_("%08x"), id);
 
-    PrintAndLogEx(SUCCESS, "Valid Hitag2 tag found - UID: %08x", id);
     if (htf != RHT2F_UID_ONLY) {
-        
-        PrintAndLogEx(SUCCESS, "Dumping tag memory..." );
-        uint8_t *data = resp.d.asBytes;
-
-        char filename[FILE_PATH_SIZE];
-        char *fnameptr = filename;
-        fnameptr += sprintf(fnameptr, "lf-hitag-");
-        FillFileNameByUID(fnameptr, data, "-dump", 4);
-
-        saveFile(filename, "bin", data, 48);
-        saveFileEML(filename, "eml", data, 48, 4);
-        saveFileJSON(filename, "json", jsfHitag, data, 48);
-        
+    
         // block3, 1 byte
-        printHitagConfiguration(data[4*3] );
+        printHitagConfiguration(data[4 * 3]);
     }
-    return 0;
+    return PM3_SUCCESS;
 }
 
-int CmdLFHitagCheckChallenges(const char *Cmd) {
+static int CmdLFHitagCheckChallenges(const char *Cmd) {
 
-    UsbCommand c = { CMD_TEST_HITAGS_TRACES, {0, 0, 0}};
     char filename[FILE_PATH_SIZE] = { 0x00 };
     size_t datalen = 0;
     int res = 0;
@@ -604,14 +590,13 @@ int CmdLFHitagCheckChallenges(const char *Cmd) {
                 free(data);
                 return usage_hitag_checkchallenges();
             case 'f':
+                //file with all the challenges to try
                 param_getstr(Cmd, cmdp + 1, filename, sizeof(filename));
-                res = loadFile(filename, "cc", data, 8 * 60, &datalen);
+                res = loadFile(filename, ".cc", data, 8 * 60, &datalen);
                 if (res > 0) {
                     errors = true;
                     break;
                 }
-
-                memcpy(c.d.asBytes, data, datalen);
                 file_given = true;
                 cmdp += 2;
                 break;
@@ -628,84 +613,155 @@ int CmdLFHitagCheckChallenges(const char *Cmd) {
         return usage_hitag_checkchallenges();
     }
 
-    //file with all the challenges to try
-    c.arg[0] = (uint32_t)file_given;
     clearCommandBuffer();
-    SendCommand(&c);
+    if (file_given)
+        SendCommandOLD(CMD_LF_HITAGS_TEST_TRACES, 1, 0, 0, data, datalen);
+    else
+        SendCommandMIX(CMD_LF_HITAGS_TEST_TRACES, 0, 0, 0, NULL, 0);
 
     free(data);
-    return 0;
+    return PM3_SUCCESS;
 }
 
-int CmdLFHitagWriter(const char *Cmd) {
-    UsbCommand c = { CMD_WR_HITAG_S, {0, 0, 0}};
-    hitag_data *htd = (hitag_data *)c.d.asBytes;
+static int CmdLFHitagWriter(const char *Cmd) {
+    hitag_data htd;
     hitag_function htf = param_get32ex(Cmd, 0, 0, 10);
 
+    uint32_t arg2 = 0;
     switch (htf) {
         case WHTSF_CHALLENGE: {
-            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 8, htd->auth.NrAr);
-            c.arg[2] = param_get32ex(Cmd, 2, 0, 10);
-            num_to_bytes(param_get32ex(Cmd, 3, 0, 16), 4, htd->auth.data);
+            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 8, htd.auth.NrAr);
+            arg2 = param_get32ex(Cmd, 2, 0, 10);
+            num_to_bytes(param_get32ex(Cmd, 3, 0, 16), 4, htd.auth.data);
             break;
         }
         case WHTSF_KEY:
         case WHT2F_CRYPTO: {
-            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 6, htd->crypto.key);
-            c.arg[2] = param_get32ex(Cmd, 2, 0, 10);
-            num_to_bytes(param_get32ex(Cmd, 3, 0, 16), 4, htd->crypto.data);
+            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 6, htd.crypto.key);
+            arg2 = param_get32ex(Cmd, 2, 0, 10);
+            num_to_bytes(param_get32ex(Cmd, 3, 0, 16), 4, htd.crypto.data);
             break;
         }
-        default: {
+        case WHT2F_PASSWORD: {
+            num_to_bytes(param_get64ex(Cmd, 1, 0, 16), 4, htd.pwd.password);
+            arg2 = param_get32ex(Cmd, 2, 0, 10);
+            num_to_bytes(param_get32ex(Cmd, 3, 0, 16), 4, htd.crypto.data);
+            break;
+        }
+        case RHTSF_CHALLENGE:
+        case RHTSF_KEY:
+        case RHT2F_PASSWORD:
+        case RHT2F_AUTHENTICATE:
+        case RHT2F_CRYPTO:
+        case RHT2F_TEST_AUTH_ATTEMPTS:
+        case RHT2F_UID_ONLY:
+        default:
             return usage_hitag_writer();
+    }
+
+    clearCommandBuffer();
+    SendCommandOLD(CMD_LF_HITAGS_WRITE, htf, 0, arg2, &htd, sizeof(htd));
+    PacketResponseNG resp;
+    if (!WaitForResponseTimeout(CMD_ACK, &resp, 4000)) {
+        PrintAndLogEx(WARNING, "timeout while waiting for reply.");
+        return PM3_ETIMEOUT;
+    }
+
+    if (resp.oldarg[0] == false) {
+        PrintAndLogEx(DEBUG, "DEBUG: Error - hitag write failed");
+        return PM3_ESOFT;
+    }
+    return PM3_SUCCESS;
+}
+
+static int CmdLFHitag2Dump(const char *Cmd) {
+    PrintAndLogEx(INFO, "Dumping of tag memory");
+
+    char ctmp = tolower(param_getchar(Cmd, 0));
+    if (ctmp == 'h') return 0; // usage_hitag_dump();
+
+    PacketResponseNG resp;
+ 
+    PrintAndLogEx(SUCCESS, "Dumping tag memory...");
+    uint8_t *data = resp.data.asBytes;
+
+    char filename[FILE_PATH_SIZE];
+    char *fnameptr = filename;
+    fnameptr += sprintf(fnameptr, "lf-hitag-");
+    FillFileNameByUID(fnameptr, data, "-dump", 4);
+
+    saveFile(filename, ".bin", data, 48);
+    saveFileEML(filename, data, 48, 4);
+    saveFileJSON(filename, jsfHitag, data, 48);
+
+    return PM3_SUCCESS;
+}
+
+
+// Annotate HITAG protocol
+void annotateHitag1(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {  
+}
+
+void annotateHitag2(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
+
+    uint8_t cmdbits = (cmd[0] & 0xC0) >> 6;
+
+    if (cmdsize == 1) {
+        if (cmdbits == HITAG2_START_AUTH) {
+            snprintf(exp, size, "START AUTH");
+            return;
+        }
+        if (cmdbits == HITAG2_HALT) {
+            snprintf(exp, size, "HALT");
+            return;
         }
     }
 
-    c.arg[0] = htf;
-
-    clearCommandBuffer();
-    SendCommand(&c);
-    UsbCommand resp;
-    if (!WaitForResponseTimeout(CMD_ACK, &resp, 4000)) {
-        PrintAndLogEx(WARNING, "timeout while waiting for reply.");
-        return 1;
+    if (cmdsize == 2) {
+        if (cmdbits == HITAG2_START_AUTH) {
+            // C     1     C   0
+            // 1100 0 00 1 1100 000
+            uint8_t page = (cmd[0] & 0x38) >> 3;
+            uint8_t inv_page = ((cmd[0] & 0x1) << 2) | ((cmd[1] & 0xC0) >> 6);
+            snprintf(exp, size, "READ page(%x) %x", page, inv_page);
+            return;
+        }
+        if (cmdbits == HITAG2_WRITE_PAGE) {
+            uint8_t page = (cmd[0] & 0x38) >> 3;
+            uint8_t inv_page = ((cmd[0] & 0x1) << 2) | ((cmd[1] & 0xC0) >> 6);
+            snprintf(exp, size, "WRITE page(%x) %x", page, inv_page);
+            return;
+        }
     }
-
-    if (resp.arg[0] == false) {
-        PrintAndLogEx(DEBUG, "DEBUG: Error - hitag write failed");
-        return 1;
-    }
-    return 0;
 }
 
-int CmdLFHitagDump(const char *Cmd) {
-    PrintAndLogEx(INFO, "Dumping of tag memory");
-    PrintAndLogEx(INFO, "To be done!");
-
-    char ctmp = tolower(param_getchar(Cmd, 0));
-    if (ctmp == 'h') return usage_hitag_dump();
-    return 0;
+void annotateHitagS(char *exp, size_t size, uint8_t *cmd, uint8_t cmdsize) {
 }
 
 static command_t CommandTable[] = {
-    {"help",     CmdHelp,                   1, "This help" },
-    {"list",     CmdLFHitagList,            0, "List Hitag trace history" },
-    {"info",     CmdLFHitagInfo,            1, "Tag information" },
-    {"reader",   CmdLFHitagReader,          1, "Act like a Hitag Reader" },
-    {"sim",      CmdLFHitagSim,             1, "Simulate Hitag transponder" },
-    {"sniff",    CmdLFHitagSniff,           1, "Eavesdrop Hitag communication" },
-    {"writer",   CmdLFHitagWriter,          1, "Act like a Hitag Writer" },
-    {"cc",       CmdLFHitagCheckChallenges, 1, "Test all challenges" },
+    {"help",   CmdHelp,               AlwaysAvailable, "This help" },
+    {"list",   CmdLFHitagList,        IfPm3Hitag,      "List Hitag trace history" },
+    {"info",   CmdLFHitagInfo,        IfPm3Hitag,      "Tag information" },
+    {"reader", CmdLFHitagReader,      IfPm3Hitag,      "Act like a Hitag Reader" },
+    {"sim",    CmdLFHitagSim,         IfPm3Hitag,      "Simulate Hitag transponder" },
+    {"sniff",  CmdLFHitagSniff,       IfPm3Hitag,      "Eavesdrop Hitag communication" },
+    {"writer", CmdLFHitagWriter,      IfPm3Hitag,      "Act like a Hitag Writer" },
+    {"dump",   CmdLFHitag2Dump,       IfPm3Hitag,      "Dump Hitag2 tag" },
+    {"cc",     CmdLFHitagCheckChallenges, IfPm3Hitag,  "Test all challenges" },
     { NULL, NULL, 0, NULL }
 };
 
-int CmdLFHitag(const char *Cmd) {
-    clearCommandBuffer();
-    CmdsParse(CommandTable, Cmd);
-    return 0;
+static int CmdHelp(const char *Cmd) {
+    (void)Cmd; // Cmd is not used so far
+    CmdsHelp(CommandTable);
+    return PM3_SUCCESS;
 }
 
-int CmdHelp(const char *Cmd) {
-    CmdsHelp(CommandTable);
-    return 0;
+int CmdLFHitag(const char *Cmd) {
+    clearCommandBuffer();
+    return CmdsParse(CommandTable, Cmd);
+}
+
+int readHitagUid(void) {
+    return (CmdLFHitagReader("26") == PM3_SUCCESS);
 }

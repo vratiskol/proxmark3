@@ -7,16 +7,21 @@
 //-----------------------------------------------------------------------------
 // Proxmark3 RDV40 Flash memory commands
 //-----------------------------------------------------------------------------
-#ifdef WITH_FLASH
-
 #include "cmdflashmem.h"
+
+#include <ctype.h>
+
+#include "cmdparser.h"    // command_t
+
+#include "pmflash.h"
+#include "fileutils.h"  //saveFile
+#include "comms.h"              //getfromdevice
+#include "cmdflashmemspiffs.h" // spiffs commands
 
 #include "mbedtls/rsa.h"
 #include "mbedtls/sha1.h"
-#include "mbedtls/base64.h"
 
 #define MCK 48000000
-//#define FLASH_BAUD 24000000
 #define FLASH_MINFAST 24000000 //33000000
 #define FLASH_BAUD MCK/2
 #define FLASH_FASTBAUD MCK
@@ -26,34 +31,25 @@
 
 static int CmdHelp(const char *Cmd);
 
-int usage_flashmem_spibaud(void) {
+static int usage_flashmem_spibaud(void) {
     PrintAndLogEx(NORMAL, "Usage:  mem spibaud [h] <baudrate>");
     PrintAndLogEx(NORMAL, "Options:");
     PrintAndLogEx(NORMAL, "           h    this help");
     PrintAndLogEx(NORMAL, "      <baudrate>    SPI baudrate in MHz [24|48]");
     PrintAndLogEx(NORMAL, "           ");
-    PrintAndLogEx(NORMAL, "           If >= 24Mhz, FASTREADS instead of READS instruction will be used.");
-    PrintAndLogEx(NORMAL, "           Reading Flash ID will virtually always fail under 48Mhz setting");
-    PrintAndLogEx(NORMAL, "           Unless you know what you are doing, please stay at 24Mhz");
+    PrintAndLogEx(NORMAL, "           If >= 24MHz, FASTREADS instead of READS instruction will be used.");
+    PrintAndLogEx(NORMAL, "           Reading Flash ID will virtually always fail under 48MHz setting");
+    PrintAndLogEx(NORMAL, "           Unless you know what you are doing, please stay at 24MHz");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "           mem spibaud 48");
-    return 0;
+    return PM3_SUCCESS;
 }
 
-int usage_flashmem_read(void) {
-    PrintAndLogEx(NORMAL, "Read flash memory on device");
-    PrintAndLogEx(NORMAL, "Usage:  mem read o <offset> l <len>");
-    PrintAndLogEx(NORMAL, "  o <offset>    :      offset in memory");
-    PrintAndLogEx(NORMAL, "  l <len>       :      length");
-    PrintAndLogEx(NORMAL, "");
-    PrintAndLogEx(NORMAL, "Examples:");
-    PrintAndLogEx(NORMAL, "        mem read o 0 l 32");    // read 32 bytes starting at offset 0
-    PrintAndLogEx(NORMAL, "        mem read o 1024 l 10"); // read 10 bytes starting at offset 1024
-    return 0;
-}
-int usage_flashmem_load(void) {
+static int usage_flashmem_load(void) {
     PrintAndLogEx(NORMAL, "Loads binary file into flash memory on device");
-    PrintAndLogEx(NORMAL, "Usage:  mem load o <offset> f <file name> m t i");
+    PrintAndLogEx(NORMAL, "Usage:  mem load [o <offset>] f <file name> [m|t|i]");
+    PrintAndLogEx(NORMAL, "Warning: mem area to be written must have been wiped first");
+    PrintAndLogEx(NORMAL, "(this is already taken care when loading dictionaries)");
     PrintAndLogEx(NORMAL, "  o <offset>    :      offset in memory");
     PrintAndLogEx(NORMAL, "  f <filename>  :      file name");
     PrintAndLogEx(NORMAL, "  m             :      upload 6 bytes keys (mifare key dictionary)");
@@ -63,25 +59,27 @@ int usage_flashmem_load(void) {
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "        mem load f myfile");         // upload file myfile at default offset 0
     PrintAndLogEx(NORMAL, "        mem load f myfile o 1024");  // upload file myfile at offset 1024
-    PrintAndLogEx(NORMAL, "        mem load f default_keys m");
-    PrintAndLogEx(NORMAL, "        mem load f default_pwd t");
-    PrintAndLogEx(NORMAL, "        mem load f default_iclass_keys i");
-    return 0;
+    PrintAndLogEx(NORMAL, "        mem load f mfc_default_keys m");
+    PrintAndLogEx(NORMAL, "        mem load f t55xx_default_pwds t");
+    PrintAndLogEx(NORMAL, "        mem load f iclass_default_keys i");
+    return PM3_SUCCESS;
 }
-int usage_flashmem_save(void) {
-    PrintAndLogEx(NORMAL, "Saves flash memory on device into the file");
-    PrintAndLogEx(NORMAL, " Usage:  mem save o <offset> l <length> f <file name>");
+static int usage_flashmem_dump(void) {
+    PrintAndLogEx(NORMAL, "Dumps flash memory on device into a file or in console");
+    PrintAndLogEx(NORMAL, " Usage:  mem dump [o <offset>] [l <length>] [f <file name>] [p]");
     PrintAndLogEx(NORMAL, "  o <offset>    :      offset in memory");
     PrintAndLogEx(NORMAL, "  l <length>    :      length");
     PrintAndLogEx(NORMAL, "  f <filename>  :      file name");
+    PrintAndLogEx(NORMAL, "  p             :      print dump in console");
+    PrintAndLogEx(NORMAL, " You must specify at lease option f or option p, both if you wish");
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(NORMAL, "Examples:");
-    PrintAndLogEx(NORMAL, "        mem save f myfile");                 // download whole flashmem to file myfile
-    PrintAndLogEx(NORMAL, "        mem save f myfile l 4096");          // download 4096 bytes from default offset 0 to file myfile
-    PrintAndLogEx(NORMAL, "        mem save f myfile o 1024 l 4096");   // downlowd 4096 bytes from offset 1024 to file myfile
-    return 0;
+    PrintAndLogEx(NORMAL, "        mem dump f myfile");                 // download whole flashmem to file myfile
+    PrintAndLogEx(NORMAL, "        mem dump p o 262015 l 128");         // display 128 bytes from offset 262015 (RSA sig)
+    PrintAndLogEx(NORMAL, "        mem dump p f myfile o 241664 l 58"); // download and display 58 bytes from offset 241664 to file myfile
+    return PM3_SUCCESS;
 }
-int usage_flashmem_wipe(void) {
+static int usage_flashmem_wipe(void) {
 
     PrintAndLogEx(WARNING, "[OBS] use with caution.");
     PrintAndLogEx(NORMAL, "Wipe flash memory on device, which fills memory with 0xFF\n");
@@ -91,74 +89,39 @@ int usage_flashmem_wipe(void) {
 //  PrintAndLogEx(NORMAL, "  i           :      inital total wipe");
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(NORMAL, "Examples:");
-    PrintAndLogEx(NORMAL, "        mem wipe ");     // wipe page 0,1,2
     PrintAndLogEx(NORMAL, "        mem wipe p 0");  // wipes first page.
-    return 0;
+    return PM3_SUCCESS;
 }
-int usage_flashmem_info(void) {
+static int usage_flashmem_info(void) {
     PrintAndLogEx(NORMAL, "Collect signature and verify it from flash memory\n");
-    PrintAndLogEx(NORMAL, " Usage:  mem info [h|s|w]");
-    PrintAndLogEx(NORMAL, "  s    :      create a signature");
-    PrintAndLogEx(NORMAL, "  w    :      write signature to flash memory");
+    PrintAndLogEx(NORMAL, " Usage:  mem info");
+//    PrintAndLogEx(NORMAL, "  s    :      create a signature");
+//    PrintAndLogEx(NORMAL, "  w    :      write signature to flash memory");
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(NORMAL, "Examples:");
     PrintAndLogEx(NORMAL, "        mem info");
-    PrintAndLogEx(NORMAL, "        mem info s");
-    return 0;
+//    PrintAndLogEx(NORMAL, "        mem info s");
+    return PM3_SUCCESS;
 }
 
-int CmdFlashMemRead(const char *Cmd) {
-
-    uint8_t cmdp = 0;
-    bool errors = false;
-    uint32_t start_index = 0, len  = 0;
-
-    while (param_getchar(Cmd, cmdp) != 0x00 && !errors) {
-        switch (tolower(param_getchar(Cmd, cmdp))) {
-            case 'o':
-                start_index = param_get32ex(Cmd, cmdp + 1, 0, 10);
-                cmdp += 2;
-                break;
-            case 'l':
-                len = param_get32ex(Cmd, cmdp + 1, 0, 10);
-                cmdp += 2;
-                break;
-            case 'h':
-                return usage_flashmem_read();
-            default:
-                PrintAndLogEx(WARNING, "Unknown parameter '%c'", param_getchar(Cmd, cmdp));
-                errors = true;
-                break;
-        }
-    }
-
-    //Validations
-    if (errors || cmdp == 0) return usage_flashmem_read();
-
-    if (start_index + len > FLASH_MEM_MAX_SIZE) {
-        PrintAndLogDevice(WARNING, "error, start_index + length is larger than available memory");
-        return 1;
-    }
-
-    UsbCommand c = {CMD_FLASHMEM_READ, {start_index, len, 0}};
-    clearCommandBuffer();
-    SendCommand(&c);
-    return 0;
-}
-
-int CmdFlashmemSpiBaudrate(const char *Cmd) {
+static int CmdFlashmemSpiBaudrate(const char *Cmd) {
 
     char ctmp = tolower(param_getchar(Cmd, 0));
-    if (strlen(Cmd) < 1 || ctmp == 'h') return usage_flashmem_spibaud();
+    if (strlen(Cmd) < 1 || ctmp == 'h') {
+        return usage_flashmem_spibaud();
+    }
+
     uint32_t baudrate = param_get32ex(Cmd, 0, 0, 10);
     baudrate = baudrate * 1000000;
-    if (baudrate != FLASH_BAUD && baudrate != FLASH_MINBAUD) return usage_flashmem_spibaud();
-    UsbCommand c = {CMD_FLASHMEM_SET_SPIBAUDRATE, {baudrate, 0, 0}};
-    SendCommand(&c);
-    return 0;
+    if (baudrate != FLASH_BAUD && baudrate != FLASH_MINBAUD) {
+        usage_flashmem_spibaud();
+        return PM3_EINVARG;
+    }
+    SendCommandNG(CMD_FLASHMEM_SET_SPIBAUDRATE, (uint8_t *)&baudrate, sizeof(uint32_t));
+    return PM3_SUCCESS;
 }
 
-int CmdFlashMemLoad(const char *Cmd) {
+static int CmdFlashMemLoad(const char *Cmd) {
 
     uint32_t start_index = 0;
     char filename[FILE_PATH_SIZE] = {0};
@@ -202,8 +165,10 @@ int CmdFlashMemLoad(const char *Cmd) {
     }
 
     //Validations
-    if (errors || cmdp == 0) return usage_flashmem_load();
-
+    if (errors || cmdp == 0) {
+        usage_flashmem_load();
+        return PM3_EINVARG;
+    }
     size_t datalen = 0;
     uint16_t keycount = 0;
     int res = 0;
@@ -212,10 +177,10 @@ int CmdFlashMemLoad(const char *Cmd) {
     switch (d) {
         case DICTIONARY_MIFARE:
             start_index = DEFAULT_MF_KEYS_OFFSET;
-            res = loadFileDICTIONARY(filename, "dic", data + 2, &datalen, 6, &keycount);
+            res = loadFileDICTIONARY(filename, data + 2, &datalen, 6, &keycount);
             if (res || !keycount) {
                 free(data);
-                return 1;
+                return PM3_EFILE;
             }
             data[0] = (keycount >> 0) & 0xFF;
             data[1] = (keycount >> 8) & 0xFF;
@@ -223,10 +188,10 @@ int CmdFlashMemLoad(const char *Cmd) {
             break;
         case DICTIONARY_T55XX:
             start_index = DEFAULT_T55XX_KEYS_OFFSET;
-            res = loadFileDICTIONARY(filename, "dic", data + 2, &datalen, 4, &keycount);
+            res = loadFileDICTIONARY(filename, data + 2, &datalen, 4, &keycount);
             if (res || !keycount) {
                 free(data);
-                return 1;
+                return PM3_EFILE;
             }
             data[0] = (keycount >> 0) & 0xFF;
             data[1] = (keycount >> 8) & 0xFF;
@@ -234,78 +199,88 @@ int CmdFlashMemLoad(const char *Cmd) {
             break;
         case DICTIONARY_ICLASS:
             start_index = DEFAULT_ICLASS_KEYS_OFFSET;
-            res = loadFileDICTIONARY(filename, "dic", data + 2, &datalen, 8, &keycount);
+            res = loadFileDICTIONARY(filename, data + 2, &datalen, 8, &keycount);
             if (res || !keycount) {
                 free(data);
-                return 1;
+                return PM3_EFILE;
             }
             data[0] = (keycount >> 0) & 0xFF;
             data[1] = (keycount >> 8) & 0xFF;
             datalen += 2;
             break;
-        default:
-
-            res = loadFile(filename, "bin", data, FLASH_MEM_MAX_SIZE, &datalen);
-            //int res = loadFileEML( filename, "eml", data, &datalen);
-            if (res) {
+        case DICTIONARY_NONE:
+            res = loadFile_safe(filename, ".bin", (void **)&data, &datalen);
+            if (res != PM3_SUCCESS) {
                 free(data);
-                return 1;
+                return PM3_EFILE;
             }
 
             if (datalen > FLASH_MEM_MAX_SIZE) {
-                PrintAndLogDevice(WARNING, "error, filesize is larger than available memory");
+                PrintAndLogEx(ERR, "error, filesize is larger than available memory");
                 free(data);
-                return 1;
+                return PM3_EOVFLOW;
             }
             break;
     }
-
-    data = realloc(data, datalen);
+// not needed when we transite to loadxxxx_safe methods.(iceman)
+    uint8_t *newdata = realloc(data, datalen);
+    if (newdata == NULL) {
+        free(data);
+        return PM3_EMALLOC;
+    } else {
+        data = newdata;
+    }
 
     //Send to device
     uint32_t bytes_sent = 0;
     uint32_t bytes_remaining = datalen;
 
+    // fast push mode
+    conn.block_after_ACK = true;
+
     while (bytes_remaining > 0) {
         uint32_t bytes_in_packet = MIN(FLASH_MEM_BLOCK_SIZE, bytes_remaining);
 
-        UsbCommand c = {CMD_FLASHMEM_WRITE, {start_index + bytes_sent, bytes_in_packet, 0}};
-
-        memcpy(c.d.asBytes, data + bytes_sent, bytes_in_packet);
         clearCommandBuffer();
-        SendCommand(&c);
+
+        SendCommandOLD(CMD_FLASHMEM_WRITE, start_index + bytes_sent, bytes_in_packet, 0, data + bytes_sent, bytes_in_packet);
 
         bytes_remaining -= bytes_in_packet;
         bytes_sent += bytes_in_packet;
 
-        UsbCommand resp;
+        PacketResponseNG resp;
         if (!WaitForResponseTimeout(CMD_ACK, &resp, 2000)) {
             PrintAndLogEx(WARNING, "timeout while waiting for reply.");
+            conn.block_after_ACK = false;
             free(data);
-            return 1;
+            return PM3_ETIMEOUT;
         }
 
-        uint8_t isok  = resp.arg[0] & 0xFF;
-        if (!isok)
+        uint8_t isok  = resp.oldarg[0] & 0xFF;
+        if (!isok) {
+            conn.block_after_ACK = false;
             PrintAndLogEx(FAILED, "Flash write fail [offset %u]", bytes_sent);
-
+            return PM3_EFLASH;
+        }
     }
-    free(data);
 
-    PrintAndLogEx(SUCCESS, "Wrote %u bytes to offset %u", datalen, start_index);
-    return 0;
+    conn.block_after_ACK = false;
+    free(data);
+    PrintAndLogEx(SUCCESS, "Wrote "_GREEN_("%zu")"bytes to offset "_GREEN_("%u"), datalen, start_index);
+    return PM3_SUCCESS;
 }
-int CmdFlashMemSave(const char *Cmd) {
+static int CmdFlashMemDump(const char *Cmd) {
 
     char filename[FILE_PATH_SIZE] = {0};
     uint8_t cmdp = 0;
     bool errors = false;
+    bool print = false;
     uint32_t start_index = 0, len = FLASH_MEM_MAX_SIZE;
 
     while (param_getchar(Cmd, cmdp) != 0x00 && !errors) {
         switch (tolower(param_getchar(Cmd, cmdp))) {
             case 'h':
-                return usage_flashmem_save();
+                return usage_flashmem_dump();
             case 'l':
                 len = param_get32ex(Cmd, cmdp + 1, FLASH_MEM_MAX_SIZE, 10);
                 cmdp += 2;
@@ -313,6 +288,10 @@ int CmdFlashMemSave(const char *Cmd) {
             case 'o':
                 start_index = param_get32ex(Cmd, cmdp + 1, 0, 10);
                 cmdp += 2;
+                break;
+            case 'p':
+                print = true;
+                cmdp += 1;
                 break;
             case 'f':
                 //File handling
@@ -331,27 +310,37 @@ int CmdFlashMemSave(const char *Cmd) {
     }
 
     //Validations
-    if (errors || cmdp == 0) return usage_flashmem_save();
+    if (errors || cmdp == 0) {
+        usage_flashmem_dump();
+        return PM3_EINVARG;
+    }
 
     uint8_t *dump = calloc(len, sizeof(uint8_t));
     if (!dump) {
-        PrintAndLogDevice(WARNING, "error, cannot allocate memory ");
-        return 1;
+        PrintAndLogEx(ERR, "error, cannot allocate memory ");
+        return PM3_EMALLOC;
     }
 
-    PrintAndLogEx(NORMAL, "downloading %u bytes from flashmem", len);
-    if (!GetFromDevice(FLASH_MEM, dump, len, start_index, NULL, -1, true)) {
-        PrintAndLogEx(FAILED, "ERROR; downloading flashmem");
+    PrintAndLogEx(INFO, "downloading "_YELLOW_("%u")"bytes from flashmem", len);
+    if (!GetFromDevice(FLASH_MEM, dump, len, start_index, NULL, 0, NULL, -1, true)) {
+        PrintAndLogEx(FAILED, "ERROR; downloading from flashmemory");
         free(dump);
-        return 1;
+        return PM3_EFLASH;
     }
 
-    saveFile(filename, "bin", dump, len);
-    saveFileEML(filename, "eml", dump, len, 16);
+    if (print) {
+        print_hex_break(dump, len, 32);
+    }
+
+    if (filename[0] != '\0') {
+        saveFile(filename, ".bin", dump, len);
+        saveFileEML(filename, dump, len, 16);
+    }
+
     free(dump);
-    return 0;
+    return PM3_SUCCESS;
 }
-int CmdFlashMemWipe(const char *Cmd) {
+static int CmdFlashMemWipe(const char *Cmd) {
 
     uint8_t cmdp = 0;
     bool errors = false;
@@ -382,25 +371,29 @@ int CmdFlashMemWipe(const char *Cmd) {
     }
 
     //Validations
-    if (errors || cmdp == 0) return usage_flashmem_wipe();
+    if (errors || cmdp == 0) {
+        usage_flashmem_wipe();
+        return PM3_EINVARG;
+    }
 
-    UsbCommand c = {CMD_FLASHMEM_WIPE, {page, initalwipe, 0}};
     clearCommandBuffer();
-    SendCommand(&c);
-    UsbCommand resp;
+    SendCommandMIX(CMD_FLASHMEM_WIPE, page, initalwipe, 0, NULL, 0);
+    PacketResponseNG resp;
     if (!WaitForResponseTimeout(CMD_ACK, &resp, 8000)) {
         PrintAndLogEx(WARNING, "timeout while waiting for reply.");
-        return 1;
+        return PM3_ETIMEOUT;
     }
-    uint8_t isok  = resp.arg[0] & 0xFF;
+    uint8_t isok  = resp.oldarg[0] & 0xFF;
     if (isok)
         PrintAndLogEx(SUCCESS, "Flash WIPE ok");
-    else
+    else {
         PrintAndLogEx(FAILED, "Flash WIPE failed");
+        return PM3_EFLASH;
+    }
 
-    return 0;
+    return PM3_SUCCESS;
 }
-int CmdFlashMemInfo(const char *Cmd) {
+static int CmdFlashMemInfo(const char *Cmd) {
 
     uint8_t sha_hash[20] = {0};
     mbedtls_rsa_context rsa;
@@ -428,26 +421,28 @@ int CmdFlashMemInfo(const char *Cmd) {
     }
 
     //Validations
-    if (errors) return usage_flashmem_info();
-
-    UsbCommand c = {CMD_FLASHMEM_INFO, {0, 0, 0}};
-    clearCommandBuffer();
-    SendCommand(&c);
-    UsbCommand resp;
-    if (!WaitForResponseTimeout(CMD_ACK, &resp, 2500)) {
-        PrintAndLogEx(WARNING, "timeout while waiting for reply.");
-        return 1;
+    if (errors) {
+        usage_flashmem_info();
+        return PM3_EINVARG;
     }
 
-    uint8_t isok = resp.arg[0] & 0xFF;
+    clearCommandBuffer();
+    SendCommandNG(CMD_FLASHMEM_INFO, NULL, 0);
+    PacketResponseNG resp;
+    if (!WaitForResponseTimeout(CMD_ACK, &resp, 2500)) {
+        PrintAndLogEx(WARNING, "timeout while waiting for reply.");
+        return PM3_ETIMEOUT;
+    }
+
+    uint8_t isok = resp.oldarg[0] & 0xFF;
     if (!isok) {
         PrintAndLogEx(FAILED, "failed");
-        return 1;
+        return PM3_EFLASH;
     }
 
     // validate signature here
     rdv40_validation_t mem;
-    memcpy(&mem, (rdv40_validation_t *)resp.d.asBytes, sizeof(rdv40_validation_t));
+    memcpy(&mem, (rdv40_validation_t *)resp.data.asBytes, sizeof(rdv40_validation_t));
 
     // Flash ID hash (sha1)
     mbedtls_sha1(mem.flashid, sizeof(mem.flashid), sha_hash);
@@ -461,21 +456,18 @@ int CmdFlashMemInfo(const char *Cmd) {
     print_hex_break(mem.signature, sizeof(mem.signature), 32);
 
 //-------------------------------------------------------------------------------
-// Example RSA-1024 keypair, for test purposes  (from common/polarssl/rsa.c)
+// RRG Public RSA Key
 //
 
-// public key modulus N
-#define RSA_N   "9292758453063D803DD603D5E777D788" \
-    "8ED1D5BF35786190FA2F23EBC0848AEA" \
-    "DDA92CA6C3D80B32C4D109BE0F36D6AE" \
-    "7130B9CED7ACDF54CFC7555AC14EEBAB" \
-    "93A89813FBF3C4F8066D2D800F7C38A8" \
-    "1AE31942917403FF4946B0A83D3D3E05" \
-    "EE57C6F5F5606FB5D4BC6CD34EE0801A" \
-    "5E94BB77B07507233A0BC7BAC8F90F79"
-
 // public key Exponent E
-#define RSA_E   "10001"
+#define RSA_E "010001"
+
+// public key modulus N
+#define RSA_N "E28D809BF323171D11D1ACA4C32A5B7E0A8974FD171E75AD120D60E9B76968FF4B0A6364AE50583F9555B8EE1A725F279E949246DF0EFCE4C02B9F3ACDCC623F9337F21C0C066FFB703D8BFCB5067F309E056772096642C2B1A8F50305D5EC33DB7FB5A3C8AC42EB635AE3C148C910750ABAA280CE82DC2F180F49F30A1393B5"
+
+//-------------------------------------------------------------------------------
+// Example RSA-1024 keypair, for test purposes  (from common/polarssl/rsa.c)
+//
 
 // private key  Exponent D
 #define RSA_D   "24BF6185468786FDD303083D25E64EFC" \
@@ -559,15 +551,13 @@ int CmdFlashMemInfo(const char *Cmd) {
 
         if (shall_write) {
             // save to mem
-            c = (UsbCommand) {CMD_FLASHMEM_WRITE, {FLASH_MEM_SIGNATURE_OFFSET, FLASH_MEM_SIGNATURE_LEN, 0}};
-            memcpy(c.d.asBytes, sign, sizeof(sign));
             clearCommandBuffer();
-            SendCommand(&c);
+            SendCommandOLD(CMD_FLASHMEM_WRITE, FLASH_MEM_SIGNATURE_OFFSET, FLASH_MEM_SIGNATURE_LEN, 0, sign, sizeof(sign));
             if (!WaitForResponseTimeout(CMD_ACK, &resp, 2000)) {
                 PrintAndLogEx(WARNING, "timeout while waiting for reply.");
             } else {
 
-                if (!resp.arg[0])
+                if (!resp.oldarg[0])
                     PrintAndLogEx(FAILED, "Writing signature failed");
                 else
                     PrintAndLogEx(SUCCESS, "Writing signature ok [offset: %u]", FLASH_MEM_SIGNATURE_OFFSET);
@@ -586,29 +576,27 @@ int CmdFlashMemInfo(const char *Cmd) {
         PrintAndLogEx(FAILED, "RSA Verification failed");
 
     mbedtls_rsa_free(&rsa);
-    return 0;
+    return PM3_SUCCESS;
 }
 
 static command_t CommandTable[] = {
-    {"help",    CmdHelp,            1, "This help"},
-    {"spibaud", CmdFlashmemSpiBaudrate, 1, "Set Flash memory Spi baudrate [rdv40]"},
-    {"read",    CmdFlashMemRead,    1, "Read Flash memory [rdv40]"},
-    {"info",    CmdFlashMemInfo,    1, "Flash memory information [rdv40]"},
-    {"load",    CmdFlashMemLoad,    1, "Load data into flash memory [rdv40]"},
-    {"save",    CmdFlashMemSave,    1, "Save data from flash memory [rdv40]"},
-    {"wipe",    CmdFlashMemWipe,    1, "Wipe data from flash memory [rdv40]"},
-    {NULL, NULL, 0, NULL}
+    {"help",    CmdHelp,            AlwaysAvailable, "This help"},
+    {"spiffs",  CmdFlashMemSpiFFS,  IfPm3Flash,      "High level SPI FileSystem Flash manipulation [rdv40]"},
+    {"spibaud", CmdFlashmemSpiBaudrate, IfPm3Flash,  "Set Flash memory Spi baudrate [rdv40]"},
+    {"info",    CmdFlashMemInfo,    IfPm3Flash,      "Flash memory information [rdv40]"},
+    {"load",    CmdFlashMemLoad,    IfPm3Flash,      "Load data into flash memory [rdv40]"},
+    {"dump",    CmdFlashMemDump,    IfPm3Flash,      "Dump data from flash memory [rdv40]"},
+    {"wipe",    CmdFlashMemWipe,    IfPm3Flash,      "Wipe data from flash memory [rdv40]"},
+    {NULL, NULL, NULL, NULL}
 };
+
+static int CmdHelp(const char *Cmd) {
+    (void)Cmd; // Cmd is not used so far
+    CmdsHelp(CommandTable);
+    return PM3_SUCCESS;
+}
 
 int CmdFlashMem(const char *Cmd) {
     clearCommandBuffer();
-    CmdsParse(CommandTable, Cmd);
-    return 0;
+    return CmdsParse(CommandTable, Cmd);
 }
-
-int CmdHelp(const char *Cmd) {
-    CmdsHelp(CommandTable);
-    return 0;
-}
-
-#endif

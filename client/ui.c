@@ -9,29 +9,105 @@
 // UI utilities
 //-----------------------------------------------------------------------------
 
+/* Ensure strtok_r is available even with -std=c99; must be included before
+ */
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
 #include "ui.h"
+#include "commonutil.h"  // ARRAYLEN
+
+#include <stdio.h> // for Mingw readline
+#include <stdarg.h>
+#include <stdlib.h>
+#include <readline/readline.h>
+#include <complex.h>
+#include "util.h"
+#include "proxmark3.h"  // PROXLOG
+#include "fileutils.h"
+#include "pm3_cmd.h"
+#ifdef _WIN32
+# include <direct.h>    // _mkdir
+#endif
+#include <time.h>
+session_arg_t session;
 
 double CursorScaleFactor = 1;
-int PlotGridX = 0, PlotGridY = 0, PlotGridXdefault = 64, PlotGridYdefault = 64, CursorCPos = 0, CursorDPos = 0;
+int PlotGridX = 0, PlotGridY = 0, PlotGridXdefault = 64, PlotGridYdefault = 64;
+uint32_t CursorCPos = 0, CursorDPos = 0;
 bool flushAfterWrite = 0;
 int GridOffset = 0;
 bool GridLocked = false;
 bool showDemod = true;
 
 pthread_mutex_t print_lock = PTHREAD_MUTEX_INITIALIZER;
-static char *logfilename = "proxmark3.log";
 
-void PrintAndLogOptions(char *str[][2], size_t size, size_t space) {
+static void fPrintAndLog(FILE *stream, const char *fmt, ...);
+
+// needed by flasher, so let's put it here instead of fileutils.c
+int searchHomeFilePath(char **foundpath, const char *filename, bool create_home) {
+    if (foundpath == NULL)
+        return PM3_EINVARG;
+    const char *user_path = get_my_user_directory();
+    if (user_path == NULL) {
+        fprintf(stderr, "Could not retrieve $HOME from the environment\n");
+        return PM3_EFILE;
+    }
+    char *path = calloc(strlen(user_path) + strlen(PM3_USER_DIRECTORY) + 1, sizeof(char));
+    if (path == NULL)
+        return PM3_EMALLOC;
+    strcpy(path, user_path);
+    strcat(path, PM3_USER_DIRECTORY);
+
+    int result;
+#ifdef _WIN32
+    struct _stat st;
+    // Mingw _stat fails if path ends with /, so let's use a stripped path
+    if (path[strlen(path) - 1] == '/') {
+        path[strlen(path) - 1] = '\0';
+        result = _stat(path, &st);
+        path[strlen(path)] = '/';
+    } else {
+        result = _stat(path, &st);
+    }
+#else
+    struct stat st;
+    result = stat(path, &st);
+#endif
+    if ((result != 0) && create_home) {
+
+#ifdef _WIN32
+        if (_mkdir(path)) {
+#else
+        if (mkdir(path, 0700)) {
+#endif
+            fprintf(stderr, "Could not create user directory %s\n", path);
+            free(path);
+            return PM3_EFILE;
+        }
+    }
+    if (filename == NULL) {
+        *foundpath = path;
+        return PM3_SUCCESS;
+    }
+    path = realloc(path, (strlen(user_path) + strlen(PM3_USER_DIRECTORY) + strlen(filename) + 1) * sizeof(char));
+    strcat(path, filename);
+    *foundpath = path;
+    return PM3_SUCCESS;
+}
+
+void PrintAndLogOptions(const char *str[][2], size_t size, size_t space) {
     char buff[2000] = "Options:\n";
     char format[2000] = "";
     size_t counts[2] = {0, 0};
-    for (int i = 0; i < size; i++)
-        for (int j = 0 ; j < 2 ; j++)
+    for (size_t i = 0; i < size; i++)
+        for (size_t j = 0 ; j < 2 ; j++)
             if (counts[j] < strlen(str[i][j])) {
                 counts[j] = strlen(str[i][j]);
             }
-    for (int i = 0; i < size; i++) {
-        for (int j = 0; j < 2; j++) {
+    for (size_t i = 0; i < size; i++) {
+        for (size_t j = 0; j < 2; j++) {
             if (j == 0)
                 snprintf(format, sizeof(format), "%%%zus%%%zus", space, counts[j]);
             else
@@ -43,7 +119,10 @@ void PrintAndLogOptions(char *str[][2], size_t size, size_t space) {
     }
     PrintAndLogEx(NORMAL, "%s", buff);
 }
-void PrintAndLogEx(logLevel_t level, char *fmt, ...) {
+
+uint8_t PrintAndLogEx_spinidx = 0;
+
+void PrintAndLogEx(logLevel_t level, const char *fmt, ...) {
 
     // skip debug messages if client debugging is turned off i.e. 'DATA SETDEBUG 0'
     if (g_debugMode == 0 && level == DEBUG)
@@ -53,13 +132,13 @@ void PrintAndLogEx(logLevel_t level, char *fmt, ...) {
     char buffer[MAX_PRINT_BUFFER] = {0};
     char buffer2[MAX_PRINT_BUFFER + 20] = {0};
     char *token = NULL;
-    int size = 0;
-    //   {NORMAL, SUCCESS, INFO, FAILED, WARNING, ERR, DEBUG}
-    static char *prefixes[7] = { "", "[+] ", "[=] ", "[-] ", "[!] ", "[!!] ", "[#] "};
-
+    char *tmp_ptr = NULL;
+    FILE *stream = stdout;
+    const char *spinner[] = {_YELLOW_("[\\]"), _YELLOW_("[|]"), _YELLOW_("[/]"), _YELLOW_("[-]")};
     switch (level) {
         case ERR:
             strncpy(prefix, _RED_("[!!]"), sizeof(prefix) - 1);
+            stream = stderr;
             break;
         case FAILED:
             strncpy(prefix, _RED_("[-]"), sizeof(prefix) - 1);
@@ -73,8 +152,17 @@ void PrintAndLogEx(logLevel_t level, char *fmt, ...) {
         case WARNING:
             strncpy(prefix, _CYAN_("[!]"), sizeof(prefix) - 1);
             break;
-        default:
-            strncpy(prefix, prefixes[level], sizeof(prefix) - 1);
+        case INFO:
+            strncpy(prefix, _YELLOW_("[=]"), sizeof(prefix) - 1);
+            break;
+        case INPLACE:
+            strncpy(prefix, spinner[PrintAndLogEx_spinidx], sizeof(prefix) - 1);
+            PrintAndLogEx_spinidx++;
+            if (PrintAndLogEx_spinidx == ARRAYLEN(spinner))
+                PrintAndLogEx_spinidx = 0;
+            break;
+        case NORMAL:
+            // no prefixes for normal
             break;
     }
 
@@ -83,9 +171,9 @@ void PrintAndLogEx(logLevel_t level, char *fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
 
-    // no prefixes for normal
+    // no prefixes for normal & inplace
     if (level == NORMAL) {
-        PrintAndLog("%s", buffer);
+        fPrintAndLog(stream, "%s", buffer);
         return;
     }
 
@@ -95,43 +183,72 @@ void PrintAndLogEx(logLevel_t level, char *fmt, ...) {
 
         // line starts with newline
         if (buffer[0] == '\n')
-            PrintAndLog("");
+            fPrintAndLog(stream, "");
 
-        token = strtok(buffer, delim);
+        token = strtok_r(buffer, delim, &tmp_ptr);
 
         while (token != NULL) {
 
-            size = strlen(buffer2);
+            size_t size = strlen(buffer2);
 
             if (strlen(token))
                 snprintf(buffer2 + size, sizeof(buffer2) - size, "%s%s\n", prefix, token);
             else
                 snprintf(buffer2 + size, sizeof(buffer2) - size, "\n");
 
-            token = strtok(NULL, delim);
+            token = strtok_r(NULL, delim, &tmp_ptr);
         }
-        PrintAndLog("%s", buffer2);
+        fPrintAndLog(stream, "%s", buffer2);
     } else {
         snprintf(buffer2, sizeof(buffer2), "%s%s", prefix, buffer);
-        PrintAndLog("%s", buffer2);
+        if (level == INPLACE) {
+            char buffer3[MAX_PRINT_BUFFER + 20] = {0};
+            memcpy_filter_ansi(buffer3, buffer2, sizeof(buffer2), !session.supports_colors);
+            fprintf(stream, "\r%s", buffer3);
+            fflush(stream);
+        } else {
+            fPrintAndLog(stream, "%s", buffer2);
+        }
     }
 }
 
-void PrintAndLog(char *fmt, ...) {
+static void fPrintAndLog(FILE *stream, const char *fmt, ...) {
     char *saved_line;
     int saved_point;
-    va_list argptr, argptr2;
+    va_list argptr;
     static FILE *logfile = NULL;
     static int logging = 1;
-
+    char buffer[MAX_PRINT_BUFFER] = {0};
+    char buffer2[MAX_PRINT_BUFFER] = {0};
     // lock this section to avoid interlacing prints from different threads
     pthread_mutex_lock(&print_lock);
 
-    if (logging && !logfile) {
-        logfile = fopen(logfilename, "a");
-        if (!logfile) {
-            fprintf(stderr, "Can't open logfile, logging disabled!\n");
+    if ((g_printAndLog & PRINTANDLOG_LOG) && logging && !logfile) {
+        char *my_logfile_path = NULL;
+        char filename[40];
+        struct tm *timenow;
+        time_t now = time(NULL);
+        timenow = gmtime(&now);
+        strftime(filename, sizeof(filename), PROXLOG, timenow);
+        if (searchHomeFilePath(&my_logfile_path, filename, true) != PM3_SUCCESS) {
+            fprintf(stderr, "[-] Logging disabled!\n\n");
+            my_logfile_path = NULL;
             logging = 0;
+        } else {
+            logfile = fopen(my_logfile_path, "a");
+            if (logfile == NULL) {
+                fprintf(stderr, "[-] Can't open logfile %s, logging disabled!\n", my_logfile_path);
+                logging = 0;
+            } else {
+
+                if (session.supports_colors) {
+                    printf(_YELLOW_("[=]") "Session log " _YELLOW_("%s") "\n", my_logfile_path);
+                } else {
+                    printf("[=] Session log %s\n", my_logfile_path);
+                }
+
+            }
+            free(my_logfile_path);
         }
     }
 
@@ -153,11 +270,16 @@ void PrintAndLog(char *fmt, ...) {
 #endif
 
     va_start(argptr, fmt);
-    va_copy(argptr2, argptr);
-    vprintf(fmt, argptr);
-    printf("          "); // cleaning prompt
+    vsnprintf(buffer, sizeof(buffer), fmt, argptr);
     va_end(argptr);
-    printf("\n");
+
+    bool filter_ansi = !session.supports_colors;
+    memcpy_filter_ansi(buffer2, buffer, sizeof(buffer), filter_ansi);
+    if (g_printAndLog & PRINTANDLOG_PRINT) {
+        fprintf(stream, "%s", buffer2);
+        fprintf(stream, "          "); // cleaning prompt
+        fprintf(stream, "\n");
+    }
 
 #ifdef RL_STATE_READCMD
     // We are using GNU readline. libedit (OSX) doesn't support this flag.
@@ -170,12 +292,15 @@ void PrintAndLog(char *fmt, ...) {
     }
 #endif
 
-    if (logging && logfile) {
-        vfprintf(logfile, fmt, argptr2);
-        fprintf(logfile, "\n");
+    if ((g_printAndLog & PRINTANDLOG_LOG) && logging && logfile) {
+        if (filter_ansi) { // already done
+            fprintf(logfile, "%s\n", buffer2);
+        } else {
+            memcpy_filter_ansi(buffer, buffer2, sizeof(buffer2), true);
+            fprintf(logfile, "%s\n", buffer);
+        }
         fflush(logfile);
     }
-    va_end(argptr2);
 
     if (flushAfterWrite)
         fflush(stdout);
@@ -184,17 +309,49 @@ void PrintAndLog(char *fmt, ...) {
     pthread_mutex_unlock(&print_lock);
 }
 
-void SetLogFilename(char *fn) {
-    logfilename = fn;
-}
-
 void SetFlushAfterWrite(bool value) {
     flushAfterWrite = value;
 }
 
-void iceIIR_Butterworth(int *data, const size_t len) {
+void memcpy_filter_ansi(void *dest, const void *src, size_t n, bool filter) {
+    if (filter) {
+        // Filter out ANSI sequences on these OS
+        uint8_t *rdest = (uint8_t *)dest;
+        uint8_t *rsrc = (uint8_t *)src;
+        uint16_t si = 0;
+        for (uint16_t i = 0; i < n; i++) {
+            if ((i < n - 1)
+                    && (rsrc[i] == '\x1b')
+                    && (rsrc[i + 1] >= 0x40)
+                    && (rsrc[i + 1] <= 0x5F)) {  // entering ANSI sequence
 
-    int i, j;
+                i++;
+                if ((i < n - 1) && (rsrc[i] == '[')) { // entering CSI sequence
+                    i++;
+
+                    while ((i < n - 1) && (rsrc[i] >= 0x30) && (rsrc[i] <= 0x3F)) { // parameter bytes
+                        i++;
+                    }
+
+                    while ((i < n - 1) && (rsrc[i] >= 0x20) && (rsrc[i] <= 0x2F)) { // intermediate bytes
+                        i++;
+                    }
+
+                    if ((rsrc[i] >= 0x40) && (rsrc[i] <= 0x7F)) { // final byte
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+            rdest[si++] = rsrc[i];
+        }
+    } else {
+        memcpy(dest, src, n);
+    }
+}
+
+void iceIIR_Butterworth(int *data, const size_t len) {
 
     int *output = (int *) calloc(sizeof(int) * len, sizeof(uint8_t));
     if (!output) return;
@@ -210,13 +367,11 @@ void iceIIR_Butterworth(int *data, const size_t len) {
     float b[3] = {0.003621681514929,  0.007243363029857, 0.003621681514929};
     float a[3] = {1.000000000000000, -1.822694925196308, 0.837181651256023};
 
-    float sample           = 0;      // input sample read from array
-    float complex x_prime  = 1.0f;   // save sample for estimating frequency
-    float complex x;
+    for (size_t i = 0; i < adjustedLen; ++i) {
 
-    for (i = 0; i < adjustedLen; ++i) {
-
-        sample = data[i];
+        float sample = data[i];          // input sample read from array
+        float complex x_prime  = 1.0f;   // save sample for estimating frequency
+        float complex x;
 
         // remove DC offset and mix to complex baseband
         x = (sample - 127.5f) * cexpf(_Complex_I * 2 * M_PI * fc * i);
@@ -239,7 +394,7 @@ void iceIIR_Butterworth(int *data, const size_t len) {
 
     // show data
     //memcpy(data, output, adjustedLen);
-    for (j = 0; j < adjustedLen; ++j)
+    for (size_t j = 0; j < adjustedLen; ++j)
         data[j] = output[j];
 
     free(output);
@@ -251,25 +406,15 @@ void iceSimple_Filter(int *data, const size_t len, uint8_t k) {
 #define FILTER_SHIFT 4
 
     int32_t filter_reg = 0;
-    int16_t input, output;
     int8_t shift = (k <= 8) ? k : FILTER_SHIFT;
 
-    for (int i = 0; i < len; ++i) {
-
-        input = data[i];
+    for (size_t i = 0; i < len; ++i) {
         // Update filter with current sample
-        filter_reg = filter_reg - (filter_reg >> shift) + input;
+        filter_reg = filter_reg - (filter_reg >> shift) + data[i];
 
         // Scale output for unity gain
-        output = filter_reg >> shift;
-        data[i] = output;
+        data[i] = filter_reg >> shift;
     }
 }
 
-float complex cexpf(float complex Z) {
-    float complex  Res;
-    double rho = exp(__real__ Z);
-    __real__ Res = rho * cosf(__imag__ Z);
-    __imag__ Res = rho * sinf(__imag__ Z);
-    return Res;
-}
+

@@ -9,12 +9,19 @@
 //-----------------------------------------------------------------------------
 // LEGIC RF simulation code
 //-----------------------------------------------------------------------------
+#include "legicrfsim.h"
 #include "legicrf.h"
 
-#include "ticks.h"              /* timers */
 #include "crc.h"                /* legic crc-4 */
 #include "legic_prng.h"         /* legic PRNG impl */
 #include "legic.h"              /* legic_card_select_t struct */
+
+#include "proxmark3_arm.h"
+#include "BigBuf.h"
+#include "fpgaloader.h"
+#include "ticks.h"
+#include "dbprint.h"
+#include "util.h"
 
 static uint8_t *legic_mem;      /* card memory, used for sim */
 static legic_card_select_t card;/* metadata of currently selected card */
@@ -459,7 +466,7 @@ void LegicRfSimulate(uint8_t cardtype) {
 
     LED_A_ON();
     DbpString("Starting Legic emulator, press button to end");
-    while (!BUTTON_PRESS() && !usb_poll_validate_length()) {
+    while (!BUTTON_PRESS() && !data_available()) {
         WDT_HIT();
 
         // wait for carrier, restart after timeout

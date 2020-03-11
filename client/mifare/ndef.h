@@ -11,9 +11,7 @@
 #ifndef _NDEF_H_
 #define _NDEF_H_
 
-#include <stdint.h>
-#include <stdbool.h>
-#include <stddef.h>
+#include "common.h"
 
 typedef enum {
     tnfEmptyRecord          = 0x00,
@@ -57,6 +55,6 @@ typedef struct {
     uint8_t *ID;
 } NDEFHeader_t;
 
-extern int NDEFDecodeAndPrint(uint8_t *ndef, size_t ndefLen, bool verbose);
+int NDEFDecodeAndPrint(uint8_t *ndef, size_t ndefLen, bool verbose);
 
 #endif // _NDEF_H_

@@ -9,6 +9,18 @@
 //-----------------------------------------------------------------------------
 
 #include "emvcore.h"
+
+#include <string.h>
+
+#include "commonutil.h"  // ARRAYLEN
+#include "comms.h"       // DropField
+#include "cmdparser.h"
+#include "cmdsmartcard.h" // ExchangeAPDUSC
+#include "ui.h"
+#include "cmdhf14a.h"
+#include "dol.h"
+#include "dump.h"
+#include "emv_tags.h"
 #include "emvjson.h"
 #include "util_posix.h"
 
@@ -18,9 +30,8 @@ static const char *PSElist [] = {
     "325041592E5359532E4444463031", // 2PAY.SYS.DDF01 - Visa Proximity Payment System Environment - PPSE
     "315041592E5359532E4444463031"  // 1PAY.SYS.DDF01 - Visa Payment System Environment - PSE
 };
-//static const size_t PSElistLen = sizeof(PSElist)/sizeof(char*);
 
-char *TransactionTypeStr[] = {
+const char *TransactionTypeStr[] = {
     "MSD",
     "VSDC",
     "qVCDCMCHIP",
@@ -34,24 +45,24 @@ typedef struct {
 
 static const TAIDList AIDlist [] = {
     // Visa International
-    { CV_VISA,     "A00000000305076010"},        // VISA ELO Credit
-    { CV_VISA,     "A0000000031010" },           // VISA Debit/Credit (Classic)
-    { CV_VISA,     "A000000003101001" },         // VISA Credit
-    { CV_VISA,     "A000000003101002" },         // VISA Debit
-    { CV_VISA,     "A0000000032010" },           // VISA Electron
-    { CV_VISA,     "A0000000032020" },           // VISA
-    { CV_VISA,     "A0000000033010" },           // VISA Interlink
-    { CV_VISA,     "A0000000034010" },           // VISA Specific
-    { CV_VISA,     "A0000000035010" },           // VISA Specific
-    { CV_VISA,     "A0000000036010" },           // Domestic Visa Cash Stored Value
-    { CV_VISA,     "A0000000036020" },           // International Visa Cash Stored Value
-    { CV_VISA,     "A0000000038002" },           // VISA Auth, VisaRemAuthen EMV-CAP (DPA)
-    { CV_VISA,     "A0000000038010" },           // VISA Plus
-    { CV_VISA,     "A0000000039010" },           // VISA Loyalty
-    { CV_VISA,     "A000000003999910" },         // VISA Proprietary ATM
+    { CV_VISA, "A00000000305076010" },           // VISA ELO Credit
+    { CV_VISA, "A0000000031010" },               // VISA Debit/Credit (Classic)
+    { CV_VISA, "A000000003101001" },             // VISA Credit
+    { CV_VISA, "A000000003101002" },             // VISA Debit
+    { CV_VISA, "A0000000032010" },               // VISA Electron
+    { CV_VISA, "A0000000032020" },               // VISA
+    { CV_VISA, "A0000000033010" },               // VISA Interlink
+    { CV_VISA, "A0000000034010" },               // VISA Specific
+    { CV_VISA, "A0000000035010" },               // VISA Specific
+    { CV_VISA, "A0000000036010" },               // Domestic Visa Cash Stored Value
+    { CV_VISA, "A0000000036020" },               // International Visa Cash Stored Value
+    { CV_VISA, "A0000000038002" },               // VISA Auth, VisaRemAuthen EMV-CAP (DPA)
+    { CV_VISA, "A0000000038010" },               // VISA Plus
+    { CV_VISA, "A0000000039010" },               // VISA Loyalty
+    { CV_VISA, "A000000003999910" },             // VISA Proprietary ATM
     // Visa USA
-    { CV_VISA,     "A000000098" },               // Debit Card
-    { CV_VISA,     "A0000000980848" },           // Debit Card
+    { CV_VISA, "A000000098" },                   // Debit Card
+    { CV_VISA, "A0000000980848" },               // Debit Card
     // Mastercard International
     { CV_MASTERCARD, "A00000000401" },           // MasterCard PayPass
     { CV_MASTERCARD, "A0000000041010" },         // MasterCard Credit
@@ -66,6 +77,7 @@ static const TAIDList AIDlist [] = {
     { CV_MASTERCARD, "A0000000046000" },         // Cirrus
     { CV_MASTERCARD, "A0000000048002" },         // SecureCode Auth EMV-CAP
     { CV_MASTERCARD, "A0000000049999" },         // MasterCard PayPass
+    { CV_MASTERCARD, "B012345678" },             // Maestro TEST Used for development
     // American Express
     { CV_AMERICANEXPRESS, "A000000025" },
     { CV_AMERICANEXPRESS, "A0000000250000" },
@@ -82,13 +94,42 @@ static const TAIDList AIDlist [] = {
     // JCB CO., LTD.
     { CV_JCB, "A00000006510" },                  // JCB
     { CV_JCB, "A0000000651010" },                // JCB J Smart Credit
+    // Switch Card Services Ltd.
+    { CV_SWITCH, "A0000000050001" },             // Maestro UK
+    { CV_SWITCH, "A0000000050002" },             // Solo
+    // Diners Club International Ltd.
+    { CV_DINERS, "A0000001523010" },             // Discover, Pulse D Pas Discover Card
+    { CV_DINERS, "A0000001524010" },             // Discover, Discover Debit Common Card
     // Other
+    { CV_OTHER, "A00000002401" },                // Midland Bank Plc - Self Service
+    { CV_OTHER, "A0000000291010" },              // LINK Interchange Network Ltd - Link / American Express
+    { CV_OTHER, "A00000006900" },                // Société Européenne de Monnaie Electronique SEME - Moneo
+    { CV_OTHER, "A000000077010000021000000000003B" },  // Oberthur Technologies France - Visa AEPN
+    { CV_OTHER, "A0000001211010" },              // PBS Danmark A/S - Denmark - Dankort (VISA GEM Vision) - Danish domestic debit card
+    { CV_OTHER, "A0000001410001" },              // Associazione Bancaria Italiana - Italy - PagoBANCOMAT - CoGeBan Consorzio BANCOMAT (Italian domestic debit card)
     { CV_OTHER, "A0000001544442" },              // Banricompras Debito - Banrisul - Banco do Estado do Rio Grande do SUL - S.A.
-    { CV_OTHER, "F0000000030001" },              // BRADESCO
-    { CV_OTHER, "A0000005241010" },              // RuPay - RuPay
-    { CV_OTHER, "D5780000021010" }               // Bankaxept - Bankaxept
+    { CV_OTHER, "A000000172950001" },            // Financial Information Service Co. Ltd. - Taiwan - BAROC Financial Application Taiwan- The Bankers Association of the Republic of China
+    { CV_OTHER, "A0000001850002" },              // Post Office Limited - United Kingdom - UK Post Office Account card
+    { CV_OTHER, "A0000002281010" },              // Saudi Arabian Monetary Agency (SAMA) - Kingdom of Saudi Arabia - SPAN (M/Chip) - SPAN2 (Saudi Payments Network) - Saudi Arabia domestic credit/debit card (Saudi Arabia Monetary Agency)
+    { CV_OTHER, "A0000002282010" },              // Saudi Arabian Monetary Agency (SAMA) - Kingdom of Saudi Arabia - SPAN (VIS) - SPAN2 (Saudi Payments Network) - Saudi Arabia domestic credit/debit card (Saudi Arabia Monetary Agency)
+    { CV_OTHER, "A0000002771010" },              // Interac Association - Canada - INTERAC - Canadian domestic credit/debit card
+    { CV_OTHER, "A00000031510100528" },          // Currence Holding/PIN BV - The Netherlands- Currence PuC
+    { CV_OTHER, "A0000003156020" },              // Currence Holding/PIN BV - The Netherlands - Chipknip
+    { CV_OTHER, "A0000003591010028001" },        // Euro Alliance of Payment Schemes s.c.r.l. (EAPS) - Belgium - Girocard EAPS - ZKA (Germany)
+    { CV_OTHER, "A0000003710001" },              // Verve - Nigeria - InterSwitch Verve Card - Nigerian local switch company
+    { CV_OTHER, "A0000004540010" },              // eTranzact - Nigeria - Etranzact Genesis Card - Nigerian local switch company
+    { CV_OTHER, "A0000004540011" },              // eTranzact - Nigeria - Etranzact Genesis Card 2 - Nigerian local switch company
+    { CV_OTHER, "A0000004766C" },                // Google - United States - GOOGLE_PAYMENT_AID
+    { CV_OTHER, "A0000005241010" },              // RuPay - India - RuPay - RuPay (India)
+    { CV_OTHER, "A0000006723010" },              // TROY - Turkey - TROY chip credit card - Turkey's Payment Method
+    { CV_OTHER, "A0000006723020" },              // TROY - Turkey - TROY chip debit card - Turkey's Payment Method
+    { CV_OTHER, "A0000007705850" },              // Indian Oil Corporation Limited - India - XTRAPOWER Fleet Card Program - Indian Oil’s Pre Paid Program
+    { CV_OTHER, "D27600002545500100" },          // ZKA - Germany - Girocard - ZKA Girocard (Geldkarte) (Germany)
+    { CV_OTHER, "D4100000030001" },              // KS X 6923/6924 (T-Money, South Korea and Snapper+, Wellington, New Zealand)
+    { CV_OTHER, "D5280050218002" },              // The Netherlands - ? - (Netherlands)
+    { CV_OTHER, "D5780000021010" },              // Bankaxept    Norway  Bankaxept   Norwegian domestic debit card
+    { CV_OTHER, "F0000000030001" },              // BRADESCO - Brazilian Bank Banco Bradesco
 };
-static const size_t AIDlistLen = sizeof(AIDlist) / sizeof(TAIDList);
 
 static bool APDULogging = false;
 void SetAPDULogging(bool logging) {
@@ -102,7 +143,7 @@ enum CardPSVendor GetCardPSVendor(uint8_t *AID, size_t AIDlen) {
 
     hex_to_buffer((uint8_t *)buf, AID, AIDlen, sizeof(buf) - 1, 0, 0, true);
 
-    for (int i = 0; i < AIDlistLen; i ++) {
+    for (int i = 0; i < ARRAYLEN(AIDlist); i ++) {
         if (strncmp(AIDlist[i].aid, buf, strlen(AIDlist[i].aid)) == 0) {
             return AIDlist[i].vendor;
         }
@@ -232,7 +273,7 @@ struct tlvdb *GetdCVVRawFromTrack2(const struct tlv *track2) {
     return tlvdb_fixed(0x02, dCVVlen, dCVV);
 }
 
-int EMVExchangeEx(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldON, sAPDU apdu, bool IncludeLe, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
+static int EMVExchangeEx(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldON, sAPDU apdu, bool IncludeLe, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
     uint8_t data[APDU_RES_LEN] = {0};
 
     *ResultLen = 0;
@@ -246,27 +287,27 @@ int EMVExchangeEx(EMVCommandChannel channel, bool ActivateField, bool LeaveField
     }
 
     // COMPUTE APDU
-    memcpy(data, &apdu, 5);
-    if (apdu.data)
-        memcpy(&data[5], apdu.data, apdu.Lc);
+    int datalen = 0;
+    if (APDUEncodeS(&apdu, false, IncludeLe ? 0x100 : 0x00, data, &datalen)) {
+        PrintAndLogEx(ERR, "APDU encoding error.");
+        return 201;
+    }
 
     if (APDULogging)
-        PrintAndLogEx(SUCCESS, ">>>> %s", sprint_hex(data, (IncludeLe ? 6 : 5) + apdu.Lc));
+        PrintAndLogEx(SUCCESS, ">>>> %s", sprint_hex(data, datalen));
 
     switch (channel) {
         case ECC_CONTACTLESS:
-            // 6 byes + data = INS + CLA + P1 + P2 + Lc + <data = Nc> + Le(?IncludeLe)
-            res = ExchangeAPDU14a(data, (IncludeLe ? 6 : 5) + apdu.Lc, ActivateField, LeaveFieldON, Result, (int)MaxResultLen, (int *)ResultLen);
+            res = ExchangeAPDU14a(data, datalen, ActivateField, LeaveFieldON, Result, (int)MaxResultLen, (int *)ResultLen);
             if (res) {
                 return res;
             }
             break;
         case ECC_CONTACT:
-#ifdef WITH_SMARTCARD
-            res = ExchangeAPDUSC(data, (IncludeLe ? 6 : 5) + apdu.Lc, ActivateField, LeaveFieldON, Result, (int)MaxResultLen, (int *)ResultLen);
-#else
-            res = 1;
-#endif
+            if (IfPm3Smartcard())
+                res = ExchangeAPDUSC(true, data, datalen, ActivateField, LeaveFieldON, Result, (int)MaxResultLen, (int *)ResultLen);
+            else
+                res = 1;
             if (res) {
                 return res;
             }
@@ -306,7 +347,7 @@ int EMVExchangeEx(EMVCommandChannel channel, bool ActivateField, bool LeaveField
 }
 
 int EMVExchange(EMVCommandChannel channel, bool LeaveFieldON, sAPDU apdu, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
-    return EMVExchangeEx(channel, false, LeaveFieldON, apdu, (channel == ECC_CONTACTLESS), Result, MaxResultLen, ResultLen, sw, tlv);
+    return EMVExchangeEx(channel, false, LeaveFieldON, apdu, false, Result, MaxResultLen, ResultLen, sw, tlv);
 }
 
 int EMVSelect(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldON, uint8_t *AID, size_t AIDLen, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
@@ -335,7 +376,7 @@ int EMVSelectPSE(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldO
     return res;
 }
 
-int EMVSelectWithRetry(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldON, uint8_t *AID, size_t AIDLen, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
+static int EMVSelectWithRetry(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldON, uint8_t *AID, size_t AIDLen, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
     int retrycnt = 0;
     int res = 0;
     do {
@@ -353,7 +394,7 @@ int EMVSelectWithRetry(EMVCommandChannel channel, bool ActivateField, bool Leave
                 }
 
                 retrycnt = 0;
-                PrintAndLogEx(NORMAL, "Retry failed [%s]. Skiped...", sprint_hex_inrow(AID, AIDLen));
+                PrintAndLogEx(NORMAL, "Retry failed [%s]. Skipped...", sprint_hex_inrow(AID, AIDLen));
                 return res;
             }
         }
@@ -362,7 +403,7 @@ int EMVSelectWithRetry(EMVCommandChannel channel, bool ActivateField, bool Leave
     return res;
 }
 
-int EMVCheckAID(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlvdbelm, struct tlvdb *tlv) {
+static int EMVCheckAID(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlvdbelm, struct tlvdb *tlv) {
     uint8_t data[APDU_RES_LEN] = {0};
     size_t datalen = 0;
     int res = 0;
@@ -402,6 +443,8 @@ int EMVSearchPSE(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldO
     uint16_t sw = 0;
     int res;
     bool fileFound = false;
+
+    const char *PSE_or_PPSE = PSENum == 1 ? "PSE" : "PPSE";
 
     // select PPSE
     res = EMVSelectPSE(channel, ActivateField, true, PSENum, data, sizeof(data), &datalen, &sw);
@@ -447,18 +490,18 @@ int EMVSearchPSE(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldO
 
                 for (uint8_t ui = 0x01; ui <= 0x10; ui++) {
                     if (sfidatalen[ui]) {
-                        struct tlvdb *tsfi = NULL;
-                        tsfi = tlvdb_parse_multi(sfidata[ui], sfidatalen[ui]);
-                        if (tsfi) {
-                            struct tlvdb *tsfitmp = tlvdb_find_path(tsfi, (tlv_tag_t[]) {0x70, 0x61, 0x00});
+
+                        struct tlvdb *tsfi_a = tlvdb_parse_multi(sfidata[ui], sfidatalen[ui]);
+                        if (tsfi_a) {
+                            struct tlvdb *tsfitmp = tlvdb_find_path(tsfi_a, (tlv_tag_t[]) {0x70, 0x61, 0x00});
                             if (!tsfitmp) {
-                                PrintAndLogEx(FAILED, "SFI 0x%02d don't have records.", sfidatalen[ui]);
+                                PrintAndLogEx(FAILED, "SFI 0x%02zu doesn't have any records.", sfidatalen[ui]);
                                 continue;
                             }
                             res = EMVCheckAID(channel, decodeTLV, tsfitmp, tlv);
                             fileFound = true;
                         }
-                        tlvdb_free(tsfi);
+                        tlvdb_free(tsfi_a);
                     }
                 }
             }
@@ -472,14 +515,14 @@ int EMVSearchPSE(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldO
             }
 
             if (!fileFound)
-                PrintAndLogEx(FAILED, "PPSE don't have records.");
+                PrintAndLogEx(FAILED, "PPSE doesn't have any records.");
 
             tlvdb_free(t);
         } else {
-            PrintAndLogEx(WARNING, "PPSE ERROR: Can't get TLV from response.");
+            PrintAndLogEx(WARNING, "%s ERROR: Can't get TLV from response.", PSE_or_PPSE);
         }
     } else {
-        PrintAndLogEx(WARNING, "PPSE ERROR: Can't select PPSE AID. Error: %d", res);
+        PrintAndLogEx(ERR, "%s ERROR: Can't select PPSE AID. Error: %d", PSE_or_PPSE, res);
     }
 
     if (!LeaveFieldON)
@@ -497,16 +540,19 @@ int EMVSearch(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldON, 
 
     int res = 0;
     int retrycnt = 0;
-    for (int i = 0; i < AIDlistLen; i ++) {
+    for (int i = 0; i < ARRAYLEN(AIDlist); i ++) {
         param_gethex_to_eol(AIDlist[i].aid, 0, aidbuf, sizeof(aidbuf), &aidlen);
-        res = EMVSelect(channel, (i == 0) ? ActivateField : false, (i == AIDlistLen - 1) ? LeaveFieldON : true, aidbuf, aidlen, data, sizeof(data), &datalen, &sw, tlv);
+        res = EMVSelect(channel, (i == 0) ? ActivateField : false, true, aidbuf, aidlen, data, sizeof(data), &datalen, &sw, tlv);
         // retry if error and not returned sw error
         if (res && res != 5) {
             if (++retrycnt < 3) {
                 i--;
             } else {
-                // (1) - card select error, proxmark error OR (200) - result length = 0
-                if (res == 1 || res == 200) {
+                // (1) - card select error, (4) reply timeout, (200) - result length = 0
+                if (res == 1 || res == 4 || res == 200) {
+                    if (!LeaveFieldON)
+                        DropFieldEx(channel);
+
                     PrintAndLogEx(WARNING, "Exit...");
                     return 1;
                 }
@@ -529,6 +575,9 @@ int EMVSearch(EMVCommandChannel channel, bool ActivateField, bool LeaveFieldON, 
             TLVPrintFromBuffer(data, datalen);
         }
     }
+
+    if (!LeaveFieldON)
+        DropFieldEx(channel);
 
     return 0;
 }
@@ -577,9 +626,9 @@ int EMVGPO(EMVCommandChannel channel, bool LeaveFieldON, uint8_t *PDOL, size_t P
 }
 
 int EMVReadRecord(EMVCommandChannel channel, bool LeaveFieldON, uint8_t SFI, uint8_t SFIrec, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
-    int res = EMVExchange(channel, LeaveFieldON, (sAPDU) {0x00, 0xb2, SFIrec, (SFI << 3) | 0x04, 0, NULL}, Result, MaxResultLen, ResultLen, sw, tlv);
-    if (*sw == 0x6700) {
-        PrintAndLogEx(INFO, ">>> trying to reissue command withouth Le...");
+    int res = EMVExchangeEx(channel, false, LeaveFieldON, (sAPDU) {0x00, 0xb2, SFIrec, (SFI << 3) | 0x04, 0, NULL}, true, Result, MaxResultLen, ResultLen, sw, tlv);
+    if (*sw == 0x6700 || *sw == 0x6f00) {
+        PrintAndLogEx(INFO, ">>> trying to reissue command without Le...");
         res = EMVExchangeEx(channel, false, LeaveFieldON, (sAPDU) {0x00, 0xb2, SFIrec, (SFI << 3) | 0x04, 0, NULL}, false, Result, MaxResultLen, ResultLen, sw, tlv);
     }
     return res;
@@ -590,9 +639,9 @@ int EMVAC(EMVCommandChannel channel, bool LeaveFieldON, uint8_t RefControl, uint
 }
 
 int EMVGenerateChallenge(EMVCommandChannel channel, bool LeaveFieldON, uint8_t *Result, size_t MaxResultLen, size_t *ResultLen, uint16_t *sw, struct tlvdb *tlv) {
-    int res = EMVExchange(channel, LeaveFieldON, (sAPDU) {0x00, 0x84, 0x00, 0x00, 0x00, NULL}, Result, MaxResultLen, ResultLen, sw, tlv);
-    if (*sw == 0x6700) {
-        PrintAndLogEx(INFO, ">>> trying to reissue command withouth Le...");
+    int res = EMVExchangeEx(channel, false, LeaveFieldON, (sAPDU) {0x00, 0x84, 0x00, 0x00, 0x00, NULL}, true, Result, MaxResultLen, ResultLen, sw, tlv);
+    if (*sw == 0x6700 || *sw == 0x6f00) {
+        PrintAndLogEx(INFO, ">>> trying to reissue command without Le...");
         res = EMVExchangeEx(channel, false, LeaveFieldON, (sAPDU) {0x00, 0x84, 0x00, 0x00, 0x00, NULL}, false, Result, MaxResultLen, ResultLen, sw, tlv);
     }
     return res;
@@ -622,14 +671,14 @@ int trSDA(struct tlvdb *tlv) {
 
     struct emv_pk *pk = get_ca_pk(tlv);
     if (!pk) {
-        PrintAndLogEx(WARNING, "Error: Key not found. Exit.");
+        PrintAndLogEx(ERR, "Error: Key not found. Exit.");
         return 2;
     }
 
     struct emv_pk *issuer_pk = emv_pki_recover_issuer_cert(pk, tlv);
     if (!issuer_pk) {
         emv_pk_free(pk);
-        PrintAndLogEx(WARNING, "Error: Issuer certificate not found. Exit.");
+        PrintAndLogEx(ERR, "Error: Issuer certificate not found. Exit.");
         return 2;
     }
 
@@ -661,7 +710,7 @@ int trSDA(struct tlvdb *tlv) {
     } else {
         emv_pk_free(issuer_pk);
         emv_pk_free(pk);
-        PrintAndLogEx(WARNING, "SSAD verify error");
+        PrintAndLogEx(ERR, "SSAD verify error");
         return 4;
     }
 
@@ -680,21 +729,21 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
 
     struct emv_pk *pk = get_ca_pk(tlv);
     if (!pk) {
-        PrintAndLogEx(WARNING, "Error: Key not found. Exit.");
+        PrintAndLogEx(ERR, "Error: Key not found. Exit.");
         return 2;
     }
 
     const struct tlv *sda_tlv = tlvdb_get(tlv, 0x21, NULL);
     /* if (!sda_tlv || sda_tlv->len < 1) { it may be 0!!!!
             emv_pk_free(pk);
-            PrintAndLogEx(WARNING, "Error: Can't find input list for Offline Data Authentication. Exit.");
+            PrintAndLogEx(ERR, "Error: Can't find input list for Offline Data Authentication. Exit.");
             return 3;
         }
     */
     struct emv_pk *issuer_pk = emv_pki_recover_issuer_cert(pk, tlv);
     if (!issuer_pk) {
         emv_pk_free(pk);
-        PrintAndLogEx(WARNING, "Error: Issuer certificate not found. Exit.");
+        PrintAndLogEx(ERR, "Error: Issuer certificate not found. Exit.");
         return 2;
     }
     PrintAndLogEx(SUCCESS, "Issuer PK recovered. RID %02hhx:%02hhx:%02hhx:%02hhx:%02hhx IDX %02hhx CSN %02hhx:%02hhx:%02hhx\n",
@@ -713,7 +762,7 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
     if (!icc_pk) {
         emv_pk_free(pk);
         emv_pk_free(issuer_pk);
-        PrintAndLogEx(WARNING, "Error: ICC certificate not found. Exit.");
+        PrintAndLogEx(ERR, "Error: ICC certificate not found. Exit.");
         return 2;
     }
     PrintAndLogEx(SUCCESS, "ICC PK recovered. RID %02hhx:%02hhx:%02hhx:%02hhx:%02hhx IDX %02hhx CSN %02hhx:%02hhx:%02hhx\n",
@@ -758,7 +807,7 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
 
         const struct tlvdb *atc_db = emv_pki_recover_atc_ex(icc_pk, tlv, true);
         if (!atc_db) {
-            PrintAndLogEx(WARNING, "Error: Can't recover IDN (ICC Dynamic Number)");
+            PrintAndLogEx(ERR, "Error: Can't recover IDN (ICC Dynamic Number)");
             emv_pk_free(pk);
             emv_pk_free(issuer_pk);
             emv_pk_free(icc_pk);
@@ -791,14 +840,14 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
             PrintAndLogEx(NORMAL, "SDAD verified OK. (Data Authentication Code: %02hhx:%02hhx)\n", dac_tlv->value[0], dac_tlv->value[1]);
             tlvdb_add(tlv, dac_db);
         } else {
-            PrintAndLogEx(WARNING, "Error: SSAD verify error");
+            PrintAndLogEx(ERR, "Error: SSAD verify error");
             emv_pk_free(pk);
             emv_pk_free(issuer_pk);
             emv_pk_free(icc_pk);
             return 4;
         }
 
-        PrintAndLogEx(NORMAL, "\n* * Calc DDOL");
+        PrintAndLogEx(NORMAL, "\n* Calc DDOL");
         const struct tlv *ddol_tlv = tlvdb_get(tlv, 0x9f49, NULL);
         if (!ddol_tlv) {
             ddol_tlv = &default_ddol_tlv;
@@ -807,19 +856,19 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
 
         struct tlv *ddol_data_tlv = dol_process(ddol_tlv, tlv, 0);
         if (!ddol_data_tlv) {
-            PrintAndLogEx(WARNING, "Error: Can't create DDOL TLV");
+            PrintAndLogEx(ERR, "Error: Can't create DDOL TLV");
             emv_pk_free(pk);
             emv_pk_free(issuer_pk);
             emv_pk_free(icc_pk);
             return 5;
         }
 
-        PrintAndLogEx(NORMAL, "DDOL data[%d]: %s", ddol_data_tlv->len, sprint_hex(ddol_data_tlv->value, ddol_data_tlv->len));
+        PrintAndLogEx(NORMAL, "DDOL data[%zu]: %s", ddol_data_tlv->len, sprint_hex(ddol_data_tlv->value, ddol_data_tlv->len));
 
-        PrintAndLogEx(NORMAL, "\n* * Internal Authenticate");
+        PrintAndLogEx(NORMAL, "\n* Internal Authenticate");
         int res = EMVInternalAuthenticate(channel, true, (uint8_t *)ddol_data_tlv->value, ddol_data_tlv->len, buf, sizeof(buf), &len, &sw, NULL);
         if (res) {
-            PrintAndLogEx(WARNING, "Internal Authenticate error(%d): %4x. Exit...", res, sw);
+            PrintAndLogEx(ERR, "Internal Authenticate error(%d): %4x. Exit...", res, sw);
             free(ddol_data_tlv);
             emv_pk_free(pk);
             emv_pk_free(issuer_pk);
@@ -830,7 +879,7 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
         struct tlvdb *dda_db = NULL;
         if (buf[0] == 0x80) {
             if (len < 3) {
-                PrintAndLogEx(WARNING, "Error: Internal Authenticate format1 parsing error. length=%d", len);
+                PrintAndLogEx(WARNING, "Warning: Internal Authenticate format1 parsing error. length=%zu", len);
             } else {
                 // parse response 0x80
                 struct tlvdb *t80 = tlvdb_parse_multi(buf, len);
@@ -843,14 +892,14 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
                 tlvdb_free(t80);
 
                 if (decodeTLV) {
-                    PrintAndLogEx(NORMAL, "* * * Decode response format 1:");
+                    PrintAndLogEx(NORMAL, "* * Decode response format 1:");
                     TLVPrintFromTLV(dda_db);
                 }
             }
         } else {
             dda_db = tlvdb_parse_multi(buf, len);
             if (!dda_db) {
-                PrintAndLogEx(WARNING, "Error: Can't parse Internal Authenticate result as TLV");
+                PrintAndLogEx(ERR, "Error: Can't parse Internal Authenticate result as TLV");
                 free(ddol_data_tlv);
                 emv_pk_free(pk);
                 emv_pk_free(issuer_pk);
@@ -866,7 +915,7 @@ int trDDA(EMVCommandChannel channel, bool decodeTLV, struct tlvdb *tlv) {
         struct tlvdb *idn_db = emv_pki_recover_idn_ex(icc_pk, dda_db, ddol_data_tlv, true);
         free(ddol_data_tlv);
         if (!idn_db) {
-            PrintAndLogEx(WARNING, "Error: Can't recover IDN (ICC Dynamic Number)");
+            PrintAndLogEx(ERR, "Error: Can't recover IDN (ICC Dynamic Number)");
             tlvdb_free(dda_db);
             emv_pk_free(pk);
             emv_pk_free(issuer_pk);
@@ -903,20 +952,20 @@ int trCDA(struct tlvdb *tlv, struct tlvdb *ac_tlv, struct tlv *pdol_data_tlv, st
 
     struct emv_pk *pk = get_ca_pk(tlv);
     if (!pk) {
-        PrintAndLogEx(WARNING, "Error: Key not found. Exit.");
+        PrintAndLogEx(ERR, "Error: Key not found. Exit.");
         return 2;
     }
 
     const struct tlv *sda_tlv = tlvdb_get(tlv, 0x21, NULL);
     if (!sda_tlv || sda_tlv->len < 1) {
-        PrintAndLogEx(WARNING, "Error: Can't find input list for Offline Data Authentication. Exit.");
+        PrintAndLogEx(ERR, "Error: Can't find input list for Offline Data Authentication. Exit.");
         emv_pk_free(pk);
         return 3;
     }
 
     struct emv_pk *issuer_pk = emv_pki_recover_issuer_cert(pk, tlv);
     if (!issuer_pk) {
-        PrintAndLogEx(WARNING, "Error: Issuer certificate not found. Exit.");
+        PrintAndLogEx(ERR, "Error: Issuer certificate not found. Exit.");
         emv_pk_free(pk);
         return 2;
     }
@@ -934,7 +983,7 @@ int trCDA(struct tlvdb *tlv, struct tlvdb *ac_tlv, struct tlv *pdol_data_tlv, st
 
     struct emv_pk *icc_pk = emv_pki_recover_icc_cert(issuer_pk, tlv, sda_tlv);
     if (!icc_pk) {
-        PrintAndLogEx(WARNING, "Error: ICC setrificate not found. Exit.");
+        PrintAndLogEx(ERR, "Error: ICC certificate not found. Exit.");
         emv_pk_free(pk);
         emv_pk_free(issuer_pk);
         return 2;
@@ -957,7 +1006,7 @@ int trCDA(struct tlvdb *tlv, struct tlvdb *ac_tlv, struct tlv *pdol_data_tlv, st
         PrintAndLogEx(NORMAL, "SSAD verified OK. (%02hhx:%02hhx)", dac_tlv->value[0], dac_tlv->value[1]);
         tlvdb_add(tlv, dac_db);
     } else {
-        PrintAndLogEx(WARNING, "Error: SSAD verify error");
+        PrintAndLogEx(ERR, "Error: SSAD verify error");
         emv_pk_free(pk);
         emv_pk_free(issuer_pk);
         emv_pk_free(icc_pk);
@@ -976,7 +1025,7 @@ int trCDA(struct tlvdb *tlv, struct tlvdb *ac_tlv, struct tlv *pdol_data_tlv, st
         PrintAndLogEx(NORMAL, "CDA verified OK.");
         tlvdb_add(tlv, idn_db);
     } else {
-        PrintAndLogEx(NORMAL, "\nERROR: CDA verify error");
+        PrintAndLogEx(ERR, "\nERROR: CDA verify error");
     }
 
     emv_pk_free(pk);
@@ -989,14 +1038,14 @@ int RecoveryCertificates(struct tlvdb *tlvRoot, json_t *root) {
 
     struct emv_pk *pk = get_ca_pk(tlvRoot);
     if (!pk) {
-        PrintAndLog("ERROR: Key not found. Exit.");
+        PrintAndLogEx(ERR, "ERROR: Key not found. Exit.");
         return 1;
     }
 
     struct emv_pk *issuer_pk = emv_pki_recover_issuer_cert(pk, tlvRoot);
     if (!issuer_pk) {
         emv_pk_free(pk);
-        PrintAndLog("WARNING: Issuer certificate not found. Exit.");
+        PrintAndLogEx(WARNING, "WARNING: Issuer certificate not found. Exit.");
         return 2;
     }
     PrintAndLogEx(SUCCESS, "Issuer PK recovered. RID %02hhx:%02hhx:%02hhx:%02hhx:%02hhx IDX %02hhx CSN %02hhx:%02hhx:%02hhx",
@@ -1040,7 +1089,7 @@ int RecoveryCertificates(struct tlvdb *tlvRoot, json_t *root) {
     char *icc_pk_c = emv_pk_dump_pk(icc_pk);
     JsonSaveStr(root, "$.ApplicationData.ICCPublicKeyDec", icc_pk_c);
     JsonSaveBufAsHex(root, "$.ApplicationData.ICCPublicKeyModulus", icc_pk->modulus, icc_pk->mlen);
-    free(issuer_pk_c);
+    free(icc_pk_c);
 
     return 0;
 }

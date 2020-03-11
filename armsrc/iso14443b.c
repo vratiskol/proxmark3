@@ -10,6 +10,20 @@
 //-----------------------------------------------------------------------------
 #include "iso14443b.h"
 
+#include "proxmark3_arm.h"
+#include "common.h"  // access to global variable: DBGLEVEL
+#include "util.h"
+#include "string.h"
+#include "crc16.h"
+#include "protocols.h"
+#include "appmain.h"
+#include "BigBuf.h"
+#include "cmd.h"
+#include "fpgaloader.h"
+#include "commonutil.h"
+#include "dbprint.h"
+#include "ticks.h"
+
 #ifndef FWT_TIMEOUT_14B
 // defaults to 2000ms
 # define FWT_TIMEOUT_14B 35312
@@ -52,7 +66,7 @@ static uint32_t iso14b_timeout = FWT_TIMEOUT_14B;
 
 //=============================================================================
 // An ISO 14443 Type B tag. We listen for commands from the reader, using
-// a UART kind of thing that's implemented in software. When we get a
+// a  kind of thing that's implemented in software. When we get a
 // frame (i.e., a group of bytes between SOF and EOF), we check the CRC.
 // If it's good, then we can do something appropriate with it, and send
 // a response.
@@ -60,14 +74,14 @@ static uint32_t iso14b_timeout = FWT_TIMEOUT_14B;
 
 
 //-----------------------------------------------------------------------------
-// The software UART that receives commands from the reader, and its state variables.
+// The software  that receives commands from the reader, and its state variables.
 //-----------------------------------------------------------------------------
 static struct {
     enum {
-        STATE_UNSYNCD,
-        STATE_GOT_FALLING_EDGE_OF_SOF,
-        STATE_AWAITING_START_BIT,
-        STATE_RECEIVING_DATA
+        STATE_14B_UNSYNCD,
+        STATE_14B_GOT_FALLING_EDGE_OF_SOF,
+        STATE_14B_AWAITING_START_BIT,
+        STATE_14B_RECEIVING_DATA
     }       state;
     uint16_t shiftReg;
     int      bitCnt;
@@ -77,8 +91,8 @@ static struct {
     uint8_t  *output;
 } Uart;
 
-static void UartReset() {
-    Uart.state = STATE_UNSYNCD;
+static void Uart14bReset() {
+    Uart.state = STATE_14B_UNSYNCD;
     Uart.shiftReg = 0;
     Uart.bitCnt = 0;
     Uart.byteCnt = 0;
@@ -86,9 +100,9 @@ static void UartReset() {
     Uart.posCnt = 0;
 }
 
-static void UartInit(uint8_t *data) {
+static void Uart14bInit(uint8_t *data) {
     Uart.output = data;
-    UartReset();
+    Uart14bReset();
 // memset(Uart.output, 0x00, MAX_FRAME_SIZE);
 }
 
@@ -120,7 +134,7 @@ static struct {
 } Demod;
 
 // Clear out the state of the "UART" that receives from the tag.
-static void DemodReset() {
+static void Demod14bReset() {
     Demod.state = DEMOD_UNSYNCD;
     Demod.bitCount = 0;
     Demod.posCount = 0;
@@ -133,9 +147,9 @@ static void DemodReset() {
     Demod.endTime = 0;
 }
 
-static void DemodInit(uint8_t *data) {
+static void Demod14bInit(uint8_t *data) {
     Demod.output = data;
-    DemodReset();
+    Demod14bReset();
     // memset(Demod.output, 0x00, MAX_FRAME_SIZE);
 }
 
@@ -159,14 +173,14 @@ static void iso14b_set_timeout(uint32_t timeout) {
         timeout = MAX_TIMEOUT;
 
     iso14b_timeout = timeout;
-    if (MF_DBGLEVEL >= 3) Dbprintf("ISO14443B Timeout set to %ld fwt", iso14b_timeout);
+    if (DBGLEVEL >= 3) Dbprintf("ISO14443B Timeout set to %ld fwt", iso14b_timeout);
 }
 static void iso14b_set_maxframesize(uint16_t size) {
     if (size > 256)
         size = MAX_FRAME_SIZE;
 
     Uart.byteCntMax = size;
-    if (MF_DBGLEVEL >= 3) Dbprintf("ISO14443B Max frame size set to %d bytes", Uart.byteCntMax);
+    if (DBGLEVEL >= 3) Dbprintf("ISO14443B Max frame size set to %d bytes", Uart.byteCntMax);
 }
 
 //-----------------------------------------------------------------------------
@@ -180,7 +194,7 @@ static void CodeIso14443bAsTag(const uint8_t *cmd, int len) {
     * Reader to card | ASK  - Amplitude Shift Keying Modulation (PCD to PICC for Type B) (NRZ-L encodig)
     * Card to reader | BPSK - Binary Phase Shift Keying Modulation, (PICC to PCD for Type B)
     *
-    * fc - carrier frequency 13.56mHz
+    * fc - carrier frequency 13.56 MHz
     * TR0 - Guard Time per 14443-2
     * TR1 - Synchronization Time per 14443-2
     * TR2 - PICC to PCD Frame Delay Time (per 14443-3 Amendment 1)
@@ -237,9 +251,6 @@ static void CodeIso14443bAsTag(const uint8_t *cmd, int len) {
     *
     */
 
-    int i, j;
-    uint8_t b;
-
     ToSendReset();
 
     // Transmit a burst of ones, as the initial thing that lets the
@@ -252,23 +263,23 @@ static void CodeIso14443bAsTag(const uint8_t *cmd, int len) {
 
     // Send SOF.
     // 10-11 ETU * 4times samples ZEROS
-    for (i = 0; i < 10; i++) { SEND4STUFFBIT(0); }
+    for (int i = 0; i < 10; i++) { SEND4STUFFBIT(0); }
     //for(i = 0; i < 10; i++) { ToSendStuffBit(0); }
 
     // 2-3 ETU * 4times samples ONES
-    for (i = 0; i < 3; i++)  { SEND4STUFFBIT(1); }
+    for (int i = 0; i < 3; i++)  { SEND4STUFFBIT(1); }
     //for(i = 0; i < 3; i++)  { ToSendStuffBit(1); }
 
     // data
-    for (i = 0; i < len; ++i) {
+    for (int i = 0; i < len; ++i) {
 
         // Start bit
         SEND4STUFFBIT(0);
         //ToSendStuffBit(0);
 
         // Data bits
-        b = cmd[i];
-        for (j = 0; j < 8; ++j) {
+        uint8_t b = cmd[i];
+        for (int j = 0; j < 8; ++j) {
             // if(b & 1) {
             // SEND4STUFFBIT(1);
             // //ToSendStuffBit(1);
@@ -292,11 +303,11 @@ static void CodeIso14443bAsTag(const uint8_t *cmd, int len) {
 
     // Send EOF.
     // 10-11 ETU * 4 sample rate = ZEROS
-    for (i = 0; i < 10; i++) { SEND4STUFFBIT(0); }
+    for (int i = 0; i < 10; i++) { SEND4STUFFBIT(0); }
     //for(i = 0; i < 10; i++) { ToSendStuffBit(0); }
 
     // why this?
-    for (i = 0; i < 40; i++) { SEND4STUFFBIT(1); }
+    for (int i = 0; i < 40; i++) { SEND4STUFFBIT(1); }
     //for(i = 0; i < 40; i++) { ToSendStuffBit(1); }
 
     // Convert from last byte pos to length
@@ -318,16 +329,16 @@ static void CodeIso14443bAsTag(const uint8_t *cmd, int len) {
  */
 static RAMFUNC int Handle14443bReaderUartBit(uint8_t bit) {
     switch (Uart.state) {
-        case STATE_UNSYNCD:
+        case STATE_14B_UNSYNCD:
             if (!bit) {
                 // we went low, so this could be the beginning of an SOF
-                Uart.state = STATE_GOT_FALLING_EDGE_OF_SOF;
+                Uart.state = STATE_14B_GOT_FALLING_EDGE_OF_SOF;
                 Uart.posCnt = 0;
                 Uart.bitCnt = 0;
             }
             break;
 
-        case STATE_GOT_FALLING_EDGE_OF_SOF:
+        case STATE_14B_GOT_FALLING_EDGE_OF_SOF:
             Uart.posCnt++;
             if (Uart.posCnt == 2) { // sample every 4 1/fs in the middle of a bit
                 if (bit) {
@@ -336,11 +347,11 @@ static RAMFUNC int Handle14443bReaderUartBit(uint8_t bit) {
                         // zeros that it's a valid SOF
                         Uart.posCnt = 0;
                         Uart.byteCnt = 0;
-                        Uart.state = STATE_AWAITING_START_BIT;
+                        Uart.state = STATE_14B_AWAITING_START_BIT;
                         LED_A_ON(); // Indicate we got a valid SOF
                     } else {
                         // didn't stay down long enough before going high, error
-                        Uart.state = STATE_UNSYNCD;
+                        Uart.state = STATE_14B_UNSYNCD;
                     }
                 } else {
                     // do nothing, keep waiting
@@ -351,27 +362,27 @@ static RAMFUNC int Handle14443bReaderUartBit(uint8_t bit) {
             if (Uart.bitCnt > 12) {
                 // Give up if we see too many zeros without a one, too.
                 LED_A_OFF();
-                Uart.state = STATE_UNSYNCD;
+                Uart.state = STATE_14B_UNSYNCD;
             }
             break;
 
-        case STATE_AWAITING_START_BIT:
+        case STATE_14B_AWAITING_START_BIT:
             Uart.posCnt++;
             if (bit) {
                 if (Uart.posCnt > 50 / 2) { // max 57us between characters = 49 1/fs, max 3 etus after low phase of SOF = 24 1/fs
                     // stayed high for too long between characters, error
-                    Uart.state = STATE_UNSYNCD;
+                    Uart.state = STATE_14B_UNSYNCD;
                 }
             } else {
                 // falling edge, this starts the data byte
                 Uart.posCnt = 0;
                 Uart.bitCnt = 0;
                 Uart.shiftReg = 0;
-                Uart.state = STATE_RECEIVING_DATA;
+                Uart.state = STATE_14B_RECEIVING_DATA;
             }
             break;
 
-        case STATE_RECEIVING_DATA:
+        case STATE_14B_RECEIVING_DATA:
             Uart.posCnt++;
             if (Uart.posCnt == 2) {
                 // time to sample a bit
@@ -394,30 +405,30 @@ static RAMFUNC int Handle14443bReaderUartBit(uint8_t bit) {
                     if (Uart.byteCnt >= Uart.byteCntMax) {
                         // Buffer overflowed, give up
                         LED_A_OFF();
-                        Uart.state = STATE_UNSYNCD;
+                        Uart.state = STATE_14B_UNSYNCD;
                     } else {
                         // so get the next byte now
                         Uart.posCnt = 0;
-                        Uart.state = STATE_AWAITING_START_BIT;
+                        Uart.state = STATE_14B_AWAITING_START_BIT;
                     }
                 } else if (Uart.shiftReg == 0x000) {
                     // this is an EOF byte
                     LED_A_OFF(); // Finished receiving
-                    Uart.state = STATE_UNSYNCD;
+                    Uart.state = STATE_14B_UNSYNCD;
                     if (Uart.byteCnt != 0)
                         return true;
 
                 } else {
                     // this is an error
                     LED_A_OFF();
-                    Uart.state = STATE_UNSYNCD;
+                    Uart.state = STATE_14B_UNSYNCD;
                 }
             }
             break;
 
         default:
             LED_A_OFF();
-            Uart.state = STATE_UNSYNCD;
+            Uart.state = STATE_14B_UNSYNCD;
             break;
     }
     return false;
@@ -441,7 +452,7 @@ static int GetIso14443bCommandFromReader(uint8_t *received, uint16_t *len) {
 
     StartCountSspClk();
 
-    volatile uint8_t b = 0;
+    volatile uint8_t b;
 
     // clear receiving shift register and holding register
     // What does this loop do? Is it TR1?
@@ -457,7 +468,7 @@ static int GetIso14443bCommandFromReader(uint8_t *received, uint16_t *len) {
         }
         */
     // Now run a `software UART' on the stream of incoming samples.
-    UartInit(received);
+    Uart14bInit(received);
 
     uint8_t mask;
     while (!BUTTON_PRESS()) {
@@ -619,12 +630,17 @@ void SimulateIso14443bTag(uint32_t pupi) {
     memcpy(encodedOK, ToSend, ToSendMax);
 
     // Simulation loop
-    while (!BUTTON_PRESS() && !usb_poll_validate_length()) {
+    while (!BUTTON_PRESS() && !data_available()) {
         WDT_HIT();
 
         // find reader field
         if (cardSTATE == SIM_NOFIELD) {
+
+#if defined RDV4
+            vHf = (MAX_ADC_HF_VOLTAGE_RDV40 * AvgAdc(ADC_CHAN_HF_RDV40)) >> 10;
+#else
             vHf = (MAX_ADC_HF_VOLTAGE * AvgAdc(ADC_CHAN_HF)) >> 10;
+#endif
             if (vHf > MF_MINFIELDV) {
                 cardSTATE = SIM_IDLE;
                 LED_A_ON();
@@ -714,7 +730,7 @@ void SimulateIso14443bTag(uint32_t pupi) {
 
         ++cmdsReceived;
     }
-    if (MF_DBGLEVEL >= 2)
+    if (DBGLEVEL >= 2)
         Dbprintf("Emulator stopped. Trace length: %d ", BigBuf_get_traceLen());
     switch_off(); //simulate
 }
@@ -945,15 +961,14 @@ static RAMFUNC int Handle14443bTagSamplesDemod(int ci, int cq) {
  *  quiet: set to 'TRUE' to disable debug output
  */
 static void GetTagSamplesFor14443bDemod() {
-    bool gotFrame = false, finished = false;
-    int lastRxCounter = ISO14443B_DMA_BUFFER_SIZE;
-    int ci = 0, cq = 0;
+    bool finished = false;
+//    int lastRxCounter = ISO14443B_DMA_BUFFER_SIZE;
     uint32_t time_0 = 0, time_stop = 0;
 
     BigBuf_free();
 
     // Set up the demodulator for tag -> reader responses.
-    DemodInit(BigBuf_malloc(MAX_FRAME_SIZE));
+    Demod14bInit(BigBuf_malloc(MAX_FRAME_SIZE));
 
     // The DMA buffer, used to stream samples from the FPGA
     int8_t *dmaBuf = (int8_t *) BigBuf_malloc(ISO14443B_DMA_BUFFER_SIZE);
@@ -961,7 +976,7 @@ static void GetTagSamplesFor14443bDemod() {
 
     // Setup and start DMA.
     if (!FpgaSetupSscDma((uint8_t *) dmaBuf, ISO14443B_DMA_BUFFER_SIZE)) {
-        if (MF_DBGLEVEL > 1) Dbprintf("FpgaSetupSscDma failed. Exiting");
+        if (DBGLEVEL > 1) Dbprintf("FpgaSetupSscDma failed. Exiting");
         return;
     }
 
@@ -978,21 +993,21 @@ static void GetTagSamplesFor14443bDemod() {
         WDT_HIT();
 
         // LSB is a fpga signal bit.
-        ci = upTo[0];
-        cq = upTo[1];
+        int ci = upTo[0];
+        int cq = upTo[1];
         upTo += 2;
-        lastRxCounter -= 2;
+//        lastRxCounter -= 2;
 
         // restart DMA buffer to receive again.
         if (upTo >= dmaBuf + ISO14443B_DMA_BUFFER_SIZE) {
             upTo = dmaBuf;
-            lastRxCounter = ISO14443B_DMA_BUFFER_SIZE;
+//            lastRxCounter = ISO14443B_DMA_BUFFER_SIZE;
             AT91C_BASE_PDC_SSC->PDC_RNPR = (uint32_t) upTo;
             AT91C_BASE_PDC_SSC->PDC_RNCR = ISO14443B_DMA_BUFFER_SIZE;
         }
 
         // https://github.com/Proxmark/proxmark3/issues/103
-        gotFrame =  Handle14443bTagSamplesDemod(ci, cq);
+        bool gotFrame =  Handle14443bTagSamplesDemod(ci, cq);
         time_stop = GetCountSspClk() - time_0;
 
         finished = (time_stop > iso14b_timeout || gotFrame);
@@ -1059,14 +1074,12 @@ static void CodeIso14443bAsReader(const uint8_t *cmd, int len) {
     *   QUESTION:  how long is a 1 or 0 in pulses in the xcorr_848 mode?
     *              1 "stuffbit" = 1ETU (9us)
     */
-    int i;
-    uint8_t b;
 
     ToSendReset();
 
     // Send SOF
     // 10-11 ETUs of ZERO
-    for (i = 0; i < 10; ++i) ToSendStuffBit(0);
+    for (int i = 0; i < 10; ++i) ToSendStuffBit(0);
 
     // 2-3 ETUs of ONE
     ToSendStuffBit(1);
@@ -1075,11 +1088,11 @@ static void CodeIso14443bAsReader(const uint8_t *cmd, int len) {
 
     // Sending cmd, LSB
     // from here we add BITS
-    for (i = 0; i < len; ++i) {
+    for (int i = 0; i < len; ++i) {
         // Start bit
         ToSendStuffBit(0);
         // Data bits
-        b = cmd[i];
+        uint8_t b = cmd[i];
         // if (  b & 1 )    ToSendStuffBit(1); else ToSendStuffBit(0);
         // if ( (b>>1) & 1) ToSendStuffBit(1); else ToSendStuffBit(0);
         // if ( (b>>2) & 1) ToSendStuffBit(1); else ToSendStuffBit(0);
@@ -1109,13 +1122,13 @@ static void CodeIso14443bAsReader(const uint8_t *cmd, int len) {
 
     // Send EOF
     // 10-11 ETUs of ZERO
-    for (i = 0; i < 10; ++i) ToSendStuffBit(0);
+    for (int i = 0; i < 10; ++i) ToSendStuffBit(0);
 
     // Transition time. TR0 - guard time
     // 8ETUS minum?
     // Per specification, Subcarrier must be stopped no later than 2 ETUs after EOF.
     // I'm guessing this is for the FPGA to be able to send all bits before we switch to listening mode
-    for (i = 0; i < 24 ; ++i) ToSendStuffBit(1);
+    for (int i = 0; i < 24 ; ++i) ToSendStuffBit(1);
 
     // TR1 - Synchronization time
     // Convert from last character reference to length
@@ -1157,12 +1170,15 @@ uint8_t iso14443b_apdu(uint8_t const *message, size_t message_length, uint8_t *r
     CodeAndTransmit14443bAsReader(message_frame, message_length + 4); //no
     // get response
     GetTagSamplesFor14443bDemod(); //no
+
+    FpgaDisableTracing();
+
     if (Demod.len < 3)
         return 0;
 
     // VALIDATE CRC
     if (!check_crc(CRC_14443_B, Demod.output, Demod.len)) {
-        if (MF_DBGLEVEL > 3) Dbprintf("crc fail ICE");
+        if (DBGLEVEL > 3) Dbprintf("crc fail ICE");
         return 0;
     }
     // copy response contents
@@ -1183,6 +1199,7 @@ uint8_t iso14443b_select_srx_card(iso14b_card_select_t *card) {
 
     CodeAndTransmit14443bAsReader(init_srx, sizeof(init_srx));
     GetTagSamplesFor14443bDemod(); //no
+    FpgaDisableTracing();
 
     if (Demod.len == 0)
         return 2;
@@ -1196,6 +1213,7 @@ uint8_t iso14443b_select_srx_card(iso14b_card_select_t *card) {
 
     CodeAndTransmit14443bAsReader(select_srx, sizeof(select_srx));
     GetTagSamplesFor14443bDemod(); //no
+    FpgaDisableTracing();
 
     if (Demod.len != 3)
         return 2;
@@ -1214,6 +1232,7 @@ uint8_t iso14443b_select_srx_card(iso14b_card_select_t *card) {
     AddCrc14B(select_srx, 1);
     CodeAndTransmit14443bAsReader(select_srx, 3); // Only first three bytes for this one
     GetTagSamplesFor14443bDemod(); //no
+    FpgaDisableTracing();
 
     if (Demod.len != 10)
         return 2;
@@ -1245,6 +1264,7 @@ uint8_t iso14443b_select_card(iso14b_card_select_t *card) {
     // first, wake up the tag
     CodeAndTransmit14443bAsReader(wupb, sizeof(wupb));
     GetTagSamplesFor14443bDemod(); //select_card
+    FpgaDisableTracing();
 
     // ATQB too short?
     if (Demod.len < 14)
@@ -1269,6 +1289,7 @@ uint8_t iso14443b_select_card(iso14b_card_select_t *card) {
 
     CodeAndTransmit14443bAsReader(attrib, sizeof(attrib));
     GetTagSamplesFor14443bDemod();//select_card
+    FpgaDisableTracing();
 
     // Answer to ATTRIB too short?
     if (Demod.len < 3)
@@ -1312,8 +1333,8 @@ void iso14443b_setup() {
     FpgaDownloadAndGo(FPGA_BITSTREAM_HF);
 
     // Initialize Demod and Uart structs
-    DemodInit(BigBuf_malloc(MAX_FRAME_SIZE));
-    UartInit(BigBuf_malloc(MAX_FRAME_SIZE));
+    Demod14bInit(BigBuf_malloc(MAX_FRAME_SIZE));
+    Uart14bInit(BigBuf_malloc(MAX_FRAME_SIZE));
 
     // connect Demodulated Signal to ADC:
     SetAdcMuxFor(GPIO_MUXSEL_HIPKD);
@@ -1345,6 +1366,7 @@ static bool ReadSTBlock(uint8_t block) {
     AddCrc14B(cmd, 2);
     CodeAndTransmit14443bAsReader(cmd, sizeof(cmd));
     GetTagSamplesFor14443bDemod();
+    FpgaDisableTracing();
 
     // Check if we got an answer from the tag
     if (Demod.len != 6) {
@@ -1417,10 +1439,10 @@ static void iso1444b_setup_sniff(void) {
     set_tracing(true);
 
     // Initialize Demod and Uart structs
-    DemodInit(BigBuf_malloc(MAX_FRAME_SIZE));
-    UartInit(BigBuf_malloc(MAX_FRAME_SIZE));
+    Demod14bInit(BigBuf_malloc(MAX_FRAME_SIZE));
+    Uart14bInit(BigBuf_malloc(MAX_FRAME_SIZE));
 
-    if (MF_DBGLEVEL > 1) {
+    if (DBGLEVEL > 1) {
         // Print debug information about the buffer sizes
         Dbprintf("[+] Sniff buffers initialized:");
         Dbprintf("[+]   trace: %i bytes", BigBuf_max_traceLen());
@@ -1462,8 +1484,7 @@ static void iso1444b_setup_sniff(void) {
  */
 void RAMFUNC SniffIso14443b(void) {
 
-    uint32_t time_0 = 0, time_start = 0, time_stop = 0;
-    int ci = 0, cq = 0;
+    uint32_t time_0 = 0, time_start = 0, time_stop;
 
     // We won't start recording the frames that we acquire until we trigger;
     // a good trigger condition to get started is probably when we see a
@@ -1479,7 +1500,7 @@ void RAMFUNC SniffIso14443b(void) {
 
     // Setup and start DMA.
     if (!FpgaSetupSscDma((uint8_t *) dmaBuf, ISO14443B_DMA_BUFFER_SIZE)) {
-        if (MF_DBGLEVEL > 1) Dbprintf("[!] FpgaSetupSscDma failed. Exiting");
+        if (DBGLEVEL > 1) Dbprintf("[!] FpgaSetupSscDma failed. Exiting");
         BigBuf_free();
         return;
     }
@@ -1491,8 +1512,8 @@ void RAMFUNC SniffIso14443b(void) {
     while (!BUTTON_PRESS()) {
         WDT_HIT();
 
-        ci = data[0];
-        cq = data[1];
+        int ci = data[0];
+        int cq = data[1];
         data += 2;
 
         if (data >= dmaBuf + ISO14443B_DMA_BUFFER_SIZE) {
@@ -1509,8 +1530,8 @@ void RAMFUNC SniffIso14443b(void) {
             if (Handle14443bReaderUartBit(ci & 0x01)) {
                 time_stop = GetCountSspClk() - time_0;
                 LogTrace(Uart.output, Uart.byteCnt, time_start, time_stop, NULL, true);
-                UartReset();
-                DemodReset();
+                Uart14bReset();
+                Demod14bReset();
             } else {
                 time_start = GetCountSspClk() - time_0;
             }
@@ -1518,12 +1539,12 @@ void RAMFUNC SniffIso14443b(void) {
             if (Handle14443bReaderUartBit(cq & 0x01)) {
                 time_stop = GetCountSspClk() - time_0;
                 LogTrace(Uart.output, Uart.byteCnt, time_start, time_stop, NULL, true);
-                UartReset();
-                DemodReset();
+                Uart14bReset();
+                Demod14bReset();
             } else {
                 time_start = GetCountSspClk() - time_0;
             }
-            ReaderIsActive = (Uart.state > STATE_GOT_FALLING_EDGE_OF_SOF);
+            ReaderIsActive = (Uart.state > STATE_14B_GOT_FALLING_EDGE_OF_SOF);
         }
 
         // no need to try decoding tag data if the reader is sending - and we cannot afford the time
@@ -1534,8 +1555,8 @@ void RAMFUNC SniffIso14443b(void) {
             if (Handle14443bTagSamplesDemod(ci, cq)) {
                 time_stop = GetCountSspClk() - time_0;
                 LogTrace(Demod.output, Demod.len, time_start, time_stop, NULL, false);
-                UartReset();
-                DemodReset();
+                Uart14bReset();
+                Demod14bReset();
             } else {
                 time_start = GetCountSspClk() - time_0;
             }
@@ -1543,7 +1564,7 @@ void RAMFUNC SniffIso14443b(void) {
         }
     }
 
-    if (MF_DBGLEVEL >= 2) {
+    if (DBGLEVEL >= 2) {
         DbpString("[+] Sniff statistics:");
         Dbprintf("[+]  uart State: %x  ByteCount: %i  ByteCountMax: %i", Uart.state,  Uart.byteCnt,  Uart.byteCntMax);
         Dbprintf("[+]  trace length: %i", BigBuf_get_traceLen());
@@ -1567,16 +1588,16 @@ void iso14b_set_trigger(bool enable) {
  * none
  *
  */
-void SendRawCommand14443B_Ex(UsbCommand *c) {
-    iso14b_command_t param = c->arg[0];
-    size_t len = c->arg[1] & 0xffff;
-    uint32_t timeout = c->arg[2];
-    uint8_t *cmd = c->d.asBytes;
-    uint8_t status = 0;
+void SendRawCommand14443B_Ex(PacketCommandNG *c) {
+    iso14b_command_t param = c->oldarg[0];
+    size_t len = c->oldarg[1] & 0xffff;
+    uint32_t timeout = c->oldarg[2];
+    uint8_t *cmd = c->data.asBytes;
+    uint8_t status;
     uint32_t sendlen = sizeof(iso14b_card_select_t);
-    uint8_t buf[USB_CMD_DATA_SIZE] = {0x00};
+    uint8_t buf[PM3_CMD_DATA_SIZE] = {0x00};
 
-    if (MF_DBGLEVEL > 3) Dbprintf("14b raw: param, %04x", param);
+    if (DBGLEVEL > 3) Dbprintf("14b raw: param, %04x", param);
 
     // turn on trigger (LED_A)
     if ((param & ISO14B_REQUEST_TRIGGER) == ISO14B_REQUEST_TRIGGER)
@@ -1595,7 +1616,7 @@ void SendRawCommand14443B_Ex(UsbCommand *c) {
     if ((param & ISO14B_SELECT_STD) == ISO14B_SELECT_STD) {
         iso14b_card_select_t *card = (iso14b_card_select_t *)buf;
         status = iso14443b_select_card(card);
-        cmd_send(CMD_ACK, status, sendlen, 0, buf, sendlen);
+        reply_mix(CMD_ACK, status, sendlen, 0, buf, sendlen);
         // 0: OK 2: attrib fail, 3:crc fail,
         if (status > 0) goto out;
     }
@@ -1603,14 +1624,14 @@ void SendRawCommand14443B_Ex(UsbCommand *c) {
     if ((param & ISO14B_SELECT_SR) == ISO14B_SELECT_SR) {
         iso14b_card_select_t *card = (iso14b_card_select_t *)buf;
         status = iso14443b_select_srx_card(card);
-        cmd_send(CMD_ACK, status, sendlen, 0, buf, sendlen);
+        reply_mix(CMD_ACK, status, sendlen, 0, buf, sendlen);
         // 0: OK 2: demod fail, 3:crc fail,
         if (status > 0) goto out;
     }
 
     if ((param & ISO14B_APDU) == ISO14B_APDU) {
         status = iso14443b_apdu(cmd, len, buf);
-        cmd_send(CMD_ACK, status, status, 0, buf, status);
+        reply_mix(CMD_ACK, status, status, 0, buf, status);
     }
 
     if ((param & ISO14B_RAW) == ISO14B_RAW) {
@@ -1621,10 +1642,11 @@ void SendRawCommand14443B_Ex(UsbCommand *c) {
 
         CodeAndTransmit14443bAsReader(cmd, len); // raw
         GetTagSamplesFor14443bDemod(); // raw
+        FpgaDisableTracing();
 
-        sendlen = MIN(Demod.len, USB_CMD_DATA_SIZE);
+        sendlen = MIN(Demod.len, PM3_CMD_DATA_SIZE);
         status = (Demod.len > 0) ? 0 : 1;
-        cmd_send(CMD_ACK, status, sendlen, 0, Demod.output, sendlen);
+        reply_old(CMD_ACK, status, sendlen, 0, Demod.output, sendlen);
     }
 
 out:

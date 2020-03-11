@@ -11,8 +11,10 @@
 //-----------------------------------------------------------------------------
 #include "mfkey.h"
 
+#include "crapto1/crapto1.h"
+
 // MIFARE
-int compare_uint64(const void *a, const void *b) {
+int inline compare_uint64(const void *a, const void *b) {
     if (*(uint64_t *)b == *(uint64_t *)a) return 0;
     if (*(uint64_t *)b < * (uint64_t *)a) return 1;
     return -1;
@@ -27,7 +29,7 @@ uint32_t intersection(uint64_t *listA, uint64_t *listB) {
     p1 = p3 = listA;
     p2 = listB;
 
-    while (*p1 != -1 && *p2 != -1) {
+    while (*p1 != UINT64_C(-1) && *p2 != UINT64_C(-1)) {
         if (compare_uint64(p1, p2) == 0) {
             *p3++ = *p1++;
             p2++;
@@ -36,7 +38,7 @@ uint32_t intersection(uint64_t *listA, uint64_t *listB) {
             while (compare_uint64(p1, p2) > 0) ++p2;
         }
     }
-    *p3 = -1;
+    *p3 = UINT64_C(-1);
     return p3 - listA;
 }
 
@@ -45,7 +47,7 @@ uint32_t intersection(uint64_t *listA, uint64_t *listB) {
 uint32_t nonce2key(uint32_t uid, uint32_t nt, uint32_t nr, uint32_t ar, uint64_t par_info, uint64_t ks_info, uint64_t **keys) {
     struct Crypto1State *states;
     uint32_t i, pos;
-    uint8_t bt, ks3x[8], par[8][8];
+    uint8_t ks3x[8], par[8][8];
     uint64_t key_recovered;
     uint64_t *keylist;
 
@@ -54,7 +56,7 @@ uint32_t nonce2key(uint32_t uid, uint32_t nt, uint32_t nr, uint32_t ar, uint64_t
 
     for (pos = 0; pos < 8; pos++) {
         ks3x[7 - pos] = (ks_info >> (pos * 8)) & 0x0F;
-        bt = (par_info >> (pos * 8)) & 0xFF;
+        uint8_t bt = (par_info >> (pos * 8)) & 0xFF;
 
         par[7 - pos][0] = (bt >> 0) & 1;
         par[7 - pos][1] = (bt >> 1) & 1;
@@ -87,25 +89,25 @@ uint32_t nonce2key(uint32_t uid, uint32_t nt, uint32_t nr, uint32_t ar, uint64_t
 }
 
 // recover key from 2 different reader responses on same tag challenge
-bool mfkey32(nonces_t data, uint64_t *outputkey) {
+bool mfkey32(nonces_t *data, uint64_t *outputkey) {
     struct Crypto1State *s, *t;
     uint64_t outkey = 0;
     uint64_t key = 0;     // recovered key
     bool isSuccess = false;
     uint8_t counter = 0;
 
-    uint32_t p640 = prng_successor(data.nonce, 64);
-    uint32_t p641 = prng_successor(data.nonce2, 64);
-    s = lfsr_recovery32(data.ar ^ p640, 0);
+    uint32_t p640 = prng_successor(data->nonce, 64);
+
+    s = lfsr_recovery32(data->ar ^ p640, 0);
 
     for (t = s; t->odd | t->even; ++t) {
         lfsr_rollback_word(t, 0, 0);
-        lfsr_rollback_word(t, data.nr, 1);
-        lfsr_rollback_word(t, data.cuid ^ data.nonce, 0);
+        lfsr_rollback_word(t, data->nr, 1);
+        lfsr_rollback_word(t, data->cuid ^ data->nonce, 0);
         crypto1_get_lfsr(t, &key);
-        crypto1_word(t, data.cuid ^ data.nonce, 0);
-        crypto1_word(t, data.nr2, 1);
-        if (data.ar2 == (crypto1_word(t, 0, 0) ^ p641)) {
+        crypto1_word(t, data->cuid ^ data->nonce, 0);
+        crypto1_word(t, data->nr2, 1);
+        if (data->ar2 == (crypto1_word(t, 0, 0) ^ p640)) {
             outkey = key;
             counter++;
             if (counter == 20) break;
@@ -119,26 +121,26 @@ bool mfkey32(nonces_t data, uint64_t *outputkey) {
 
 // recover key from 2 reader responses on 2 different tag challenges
 // skip "several found keys".  Only return true if ONE key is found
-bool mfkey32_moebius(nonces_t data, uint64_t *outputkey) {
+bool mfkey32_moebius(nonces_t *data, uint64_t *outputkey) {
     struct Crypto1State *s, *t;
     uint64_t outkey  = 0;
     uint64_t key     = 0; // recovered key
     bool isSuccess = false;
     int counter = 0;
-    uint32_t p640 = prng_successor(data.nonce, 64);
-    uint32_t p641 = prng_successor(data.nonce2, 64);
+    uint32_t p640 = prng_successor(data->nonce, 64);
+    uint32_t p641 = prng_successor(data->nonce2, 64);
 
-    s = lfsr_recovery32(data.ar ^ p640, 0);
+    s = lfsr_recovery32(data->ar ^ p640, 0);
 
     for (t = s; t->odd | t->even; ++t) {
         lfsr_rollback_word(t, 0, 0);
-        lfsr_rollback_word(t, data.nr, 1);
-        lfsr_rollback_word(t, data.cuid ^ data.nonce, 0);
+        lfsr_rollback_word(t, data->nr, 1);
+        lfsr_rollback_word(t, data->cuid ^ data->nonce, 0);
         crypto1_get_lfsr(t, &key);
 
-        crypto1_word(t, data.cuid ^ data.nonce2, 0);
-        crypto1_word(t, data.nr2, 1);
-        if (data.ar2 == (crypto1_word(t, 0, 0) ^ p641)) {
+        crypto1_word(t, data->cuid ^ data->nonce2, 0);
+        crypto1_word(t, data->nr2, 1);
+        if (data->ar2 == (crypto1_word(t, 0, 0) ^ p641)) {
             outkey = key;
             ++counter;
             if (counter == 20) break;
@@ -151,20 +153,20 @@ bool mfkey32_moebius(nonces_t data, uint64_t *outputkey) {
 }
 
 // recover key from reader response and tag response of one authentication sequence
-int mfkey64(nonces_t data, uint64_t *outputkey) {
+int mfkey64(nonces_t *data, uint64_t *outputkey) {
     uint64_t key = 0;  // recovered key
     uint32_t ks2;      // keystream used to encrypt reader response
     uint32_t ks3;      // keystream used to encrypt tag response
     struct Crypto1State *revstate;
 
     // Extract the keystream from the messages
-    ks2 = data.ar ^ prng_successor(data.nonce, 64);
-    ks3 = data.at ^ prng_successor(data.nonce, 96);
+    ks2 = data->ar ^ prng_successor(data->nonce, 64);
+    ks3 = data->at ^ prng_successor(data->nonce, 96);
     revstate = lfsr_recovery64(ks2, ks3);
     lfsr_rollback_word(revstate, 0, 0);
     lfsr_rollback_word(revstate, 0, 0);
-    lfsr_rollback_word(revstate, data.nr, 1);
-    lfsr_rollback_word(revstate, data.cuid ^ data.nonce, 0);
+    lfsr_rollback_word(revstate, data->nr, 1);
+    lfsr_rollback_word(revstate, data->cuid ^ data->nonce, 0);
     crypto1_get_lfsr(revstate, &key);
     crypto1_destroy(revstate);
     *outputkey = key;

@@ -236,7 +236,7 @@ int opterr = 1;         /* if error message should be printed */
 int optind = 1;         /* index into parent argv vector */
 int optopt = '?';       /* character checked for validity */
 int optreset;           /* reset getopt */
-char *optarg;           /* argument associated with option */
+const char *optarg;     /* argument associated with option */
 #endif
 
 #define PRINT_ERROR     ((opterr) && (*options != ':'))
@@ -259,7 +259,7 @@ static int parse_long_options(char *const *, const char *,
 static int gcd(int, int);
 static void permute_args(int, int, int, char *const *);
 
-static char *place = EMSG; /* option letter processing */
+static const char *place = EMSG; /* option letter processing */
 
 /* XXX: set optreset to 1 rather than these two */
 static int nonopt_start = -1; /* first non option argument (for permute) */
@@ -341,26 +341,24 @@ gcd(int a, int b) {
 static void
 permute_args(int panonopt_start, int panonopt_end, int opt_end,
              char *const *nargv) {
-    int cstart, cyclelen, i, j, ncycle, nnonopts, nopts, pos;
-    char *swap;
 
     /*
      * compute lengths of blocks and number and size of cycles
      */
-    nnonopts = panonopt_end - panonopt_start;
-    nopts = opt_end - panonopt_end;
-    ncycle = gcd(nnonopts, nopts);
-    cyclelen = (opt_end - panonopt_start) / ncycle;
+    int nnonopts = panonopt_end - panonopt_start;
+    int nopts = opt_end - panonopt_end;
+    int ncycle = gcd(nnonopts, nopts);
+    int cyclelen = (opt_end - panonopt_start) / ncycle;
 
-    for (i = 0; i < ncycle; i++) {
-        cstart = panonopt_end + i;
-        pos = cstart;
-        for (j = 0; j < cyclelen; j++) {
+    for (int i = 0; i < ncycle; i++) {
+        int cstart = panonopt_end + i;
+        int pos = cstart;
+        for (int j = 0; j < cyclelen; j++) {
             if (pos >= panonopt_end)
                 pos -= nnonopts;
             else
                 pos += nopts;
-            swap = nargv[pos];
+            char *swap = nargv[pos];
             /* LINTED const cast */
             ((char **) nargv)[pos] = nargv[cstart];
             /* LINTED const cast */
@@ -377,7 +375,7 @@ permute_args(int panonopt_start, int panonopt_end, int opt_end,
 static int
 parse_long_options(char *const *nargv, const char *options,
                    const struct option *long_options, int *idx, int short_too) {
-    char *current_argv, *has_equal;
+    const char *current_argv, *has_equal;
     size_t current_argv_len;
     int i, match;
 
@@ -1524,7 +1522,7 @@ struct arg_dbl *arg_dbln(
         addr = (size_t)(result + 1);
         rem  = addr % sizeof(double);
         result->dval  = (double *)(addr + sizeof(double) - rem);
-        ARG_TRACE(("addr=%p, dval=%p, sizeof(double)=%d rem=%d\n", addr, result->dval, (int)sizeof(double), (int)rem));
+        ARG_TRACE(("addr=%zu, dval=%p, sizeof(double)=%d rem=%d\n", addr, result->dval, (int)sizeof(double), (int)rem));
 
         result->count = 0;
     }
@@ -2552,7 +2550,7 @@ static int arg_rex_scanfn(struct arg_rex *parent, const char *argval) {
     int errorcode = 0;
     const TRexChar *error = NULL;
     TRex *rex = NULL;
-    TRexBool is_match = TRex_False;
+    TRexBool is_match;
 
     if (parent->count == parent->hdr.maxcount) {
         /* maximum number of arguments exceeded */
@@ -2960,10 +2958,19 @@ static int trex_class(TRex *exp) {
     while (*exp->_p != ']' && exp->_p != exp->_eol) {
         if (*exp->_p == '-' && first != -1) {
             int r, t;
-            if (*exp->_p++ == ']') trex_error(exp, _SC("unfinished range"));
+            if (*exp->_p++ == ']') {
+                trex_error(exp, _SC("unfinished range"));
+            }
+
             r = trex_newnode(exp, OP_RANGE);
-            if (first > *exp->_p) trex_error(exp, _SC("invalid range"));
-            if (exp->_nodes[first].type == OP_CCLASS) trex_error(exp, _SC("cannot use character classes in ranges"));
+            if (first > *exp->_p) {
+                trex_error(exp, _SC("invalid range"));
+            }
+
+            if (exp->_nodes[first].type == OP_CCLASS) {
+                trex_error(exp, _SC("cannot use character classes in ranges"));
+            }
+
             exp->_nodes[r].left = exp->_nodes[first].type;
             t = trex_escapechar(exp);
             exp->_nodes[r].right = t;
@@ -2984,8 +2991,6 @@ static int trex_class(TRex *exp) {
     if (first != -1) {
         int c = first;
         exp->_nodes[chain].next = c;
-        chain = c;
-        first = -1;
     }
     /* hack? */
     exp->_nodes[ret].left = exp->_nodes[ret].next;
@@ -3263,7 +3268,6 @@ static const TRexChar *trex_matchnode(TRex *exp, TRexNode *node, const TRexChar 
                     return asd;
             }
             return NULL;
-            break;
         }
         case OP_EXPR:
         case OP_NOCAPEXPR: {
@@ -3480,8 +3484,12 @@ TRexBool trex_getsubexp(TRex *exp, int n, TRexMatch *subexp) {
 
 
 static void arg_str_resetfn(struct arg_str *parent) {
+    int i;
     ARG_TRACE(("%s:resetfn(%p)\n", __FILE__, parent));
     parent->count = 0;
+    for (i = 0; i < parent->count; i++) {
+        parent->sval[i] = "";
+    }
 }
 
 
@@ -3667,8 +3675,7 @@ void arg_register_error(struct arg_end *end,
  * Return index of first table entry with a matching short option
  * or -1 if no match was found.
  */
-static
-int find_shortoption(struct arg_hdr * *table, char shortopt) {
+static int find_shortoption(struct arg_hdr **table, char shortopt) {
     int tabindex;
     for (tabindex = 0; !(table[tabindex]->flag & ARG_TERMINATOR); tabindex++) {
         if (table[tabindex]->shortopts &&
@@ -3677,7 +3684,6 @@ int find_shortoption(struct arg_hdr * *table, char shortopt) {
     }
     return -1;
 }
-
 
 struct longoptions {
     int getoptval;
@@ -3702,8 +3708,7 @@ void dump_longoptions(struct longoptions *longoptions) {
 }
 #endif
 
-static
-struct longoptions *alloc_longoptions(struct arg_hdr * *table) {
+static struct longoptions *alloc_longoptions(struct arg_hdr **table) {
     struct longoptions *result;
     size_t nbytes;
     int noptions = 1;
@@ -3785,8 +3790,7 @@ struct longoptions *alloc_longoptions(struct arg_hdr * *table) {
     return result;
 }
 
-static
-char *alloc_shortoptions(struct arg_hdr * *table) {
+static char *alloc_shortoptions(struct arg_hdr **table) {
     char *result;
     size_t len = 2;
     int tabindex;
@@ -3826,8 +3830,7 @@ char *alloc_shortoptions(struct arg_hdr * *table) {
 
 
 /* return index of the table terminator entry */
-static
-int arg_endindex(struct arg_hdr * *table) {
+static int arg_endindex(struct arg_hdr **table) {
     int tabindex = 0;
     while (!(table[tabindex]->flag & ARG_TERMINATOR))
         tabindex++;
@@ -3835,11 +3838,10 @@ int arg_endindex(struct arg_hdr * *table) {
 }
 
 
-static
-void arg_parse_tagged(int argc,
-                      char * *argv,
-                      struct arg_hdr * *table,
-                      struct arg_end *endtable) {
+static void arg_parse_tagged(int argc,
+                             char **argv,
+                             struct arg_hdr **table,
+                             struct arg_end *endtable) {
     struct longoptions *longoptions;
     char *shortoptions;
     int copt;
@@ -3949,11 +3951,10 @@ void arg_parse_tagged(int argc,
 }
 
 
-static
-void arg_parse_untagged(int argc,
-                        char * *argv,
-                        struct arg_hdr * *table,
-                        struct arg_end *endtable) {
+static void arg_parse_untagged(int argc,
+                               char **argv,
+                               struct arg_hdr **table,
+                               struct arg_end *endtable) {
     int tabindex = 0;
     int errorlast = 0;
     const char *optarglast = NULL;
@@ -4006,7 +4007,6 @@ void arg_parse_untagged(int argc,
             optarglast = argv[optind];
             parentlast = parent;
         }
-
     }
 
     /* if a tenative error still remains at this point then register it as a proper error */
@@ -4026,8 +4026,7 @@ void arg_parse_untagged(int argc,
 }
 
 
-static
-void arg_parse_check(struct arg_hdr * *table, struct arg_end *endtable) {
+static void arg_parse_check(struct arg_hdr **table, struct arg_end *endtable) {
     int tabindex = 0;
     /* printf("arg_parse_check()\n"); */
     do {
@@ -4041,8 +4040,7 @@ void arg_parse_check(struct arg_hdr * *table, struct arg_end *endtable) {
 }
 
 
-static
-void arg_reset(void * *argtable) {
+static void arg_reset(void **argtable) {
     struct arg_hdr * *table = (struct arg_hdr * *)argtable;
     int tabindex = 0;
     /*printf("arg_reset(%p)\n",argtable);*/
@@ -4134,8 +4132,7 @@ int arg_parse(int argc, char * *argv, void * *argtable) {
  *   dest[] == "goodbye cruel world!"
  *   ndest  == 10
  */
-static
-void arg_cat(char * *pdest, const char *src, size_t *pndest) {
+static void arg_cat(char **pdest, const char *src, size_t *pndest) {
     char *dest = *pdest;
     char *end  = dest + *pndest;
 
@@ -4156,13 +4153,12 @@ void arg_cat(char * *pdest, const char *src, size_t *pndest) {
 }
 
 
-static
-void arg_cat_option(char *dest,
-                    size_t ndest,
-                    const char *shortopts,
-                    const char *longopts,
-                    const char *datatype,
-                    int optvalue) {
+static void arg_cat_option(char *dest,
+                           size_t ndest,
+                           const char *shortopts,
+                           const char *longopts,
+                           const char *datatype,
+                           int optvalue) {
     if (shortopts) {
         char option[3];
 
@@ -4215,14 +4211,13 @@ void arg_cat_option(char *dest,
     }
 }
 
-static
-void arg_cat_optionv(char *dest,
-                     size_t ndest,
-                     const char *shortopts,
-                     const char *longopts,
-                     const char *datatype,
-                     int optvalue,
-                     const char *separator) {
+static void arg_cat_optionv(char *dest,
+                            size_t ndest,
+                            const char *shortopts,
+                            const char *longopts,
+                            const char *datatype,
+                            int optvalue,
+                            const char *separator) {
     separator = separator ? separator : "";
 
     if (shortopts) {
@@ -4319,9 +4314,9 @@ void arg_print_option(FILE *fp,
 static
 void arg_print_gnuswitch(FILE *fp, struct arg_hdr * *table) {
     int tabindex;
-    char *format1 = " -%c";
-    char *format2 = " [-%c";
-    char *suffix = "";
+    const char *format1 = " -%c";
+    const char *format2 = " [-%c";
+    const char *suffix = "";
 
     /* print all mandatory switches that are without argument values */
     for (tabindex = 0;
@@ -4542,8 +4537,9 @@ void arg_print_formatted(FILE *fp,
     const unsigned colwidth = (rmargin - lmargin) + 1;
 
     /* Someone doesn't like us... */
-    if (line_end < line_start)
-    { fprintf(fp, "%s\n", text); }
+    if (line_end == line_start) {
+        fprintf(fp, "%s\n", text);
+    }
 
     while (line_end - 1 > line_start) {
         /* Eat leading whitespaces. This is essential because while
@@ -4660,7 +4656,6 @@ int arg_nullcheck(void * *argtable) {
 
     return 0;
 }
-
 
 /*
  * arg_free() is deprecated in favour of arg_freetable() due to a flaw in its design.

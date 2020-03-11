@@ -9,31 +9,48 @@
 //-----------------------------------------------------------------------------
 #include "cmdlfsecurakey.h"
 
+#include <string.h>         // memcpy
+#include <ctype.h>          // tolower
+
+#include "commonutil.h"     // ARRAYLEN
+#include "cmdparser.h"      // command_t
+#include "comms.h"
+#include "ui.h"
+#include "cmddata.h"
+#include "cmdlf.h"
+#include "lfdemod.h"    // preamble test
+#include "parity.h"     // for wiegand parity test
+#include "protocols.h"  // t55xx defines
+#include "cmdlft55xx.h" // clone..
+
 static int CmdHelp(const char *Cmd);
 
-// by marshmellow
-// find Securakey preamble in already demoded data
-int detectSecurakey(uint8_t *dest, size_t *size) {
-    if (*size < 96) return -1; //make sure buffer has data
-    size_t startIdx = 0;
-    uint8_t preamble[] = {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1};
-    if (!preambleSearch(dest, preamble, sizeof(preamble), size, &startIdx))
-        return -2; //preamble not found
-    if (*size != 96) return -3; //wrong demoded size
-    //return start position
-    return (int)startIdx;
+static int usage_lf_securakey_clone(void) {
+    PrintAndLogEx(NORMAL, "clone a Securakey tag to a T55x7 tag.");
+    PrintAndLogEx(NORMAL, "");
+    PrintAndLogEx(NORMAL, "Usage: lf securakey clone [h] [b <raw hex>]");
+    PrintAndLogEx(NORMAL, "Options:");
+    PrintAndLogEx(NORMAL, "  h               : this help");
+    PrintAndLogEx(NORMAL, "  b <raw hex>     : raw hex data. 12 bytes max");
+    PrintAndLogEx(NORMAL, "");
+    PrintAndLogEx(NORMAL, "Examples:");
+    PrintAndLogEx(NORMAL, "       lf securakey clone 7FCB400001ADEA5344300000");
+    return PM3_SUCCESS;
 }
 
 //see ASKDemod for what args are accepted
-int CmdSecurakeyDemod(const char *Cmd) {
+static int CmdSecurakeyDemod(const char *Cmd) {
+    (void)Cmd; // Cmd is not used so far
 
     //ASK / Manchester
     bool st = false;
-    if (!ASKDemod_ext("40 0 0", false, false, 1, &st)) {
+    if (ASKDemod_ext("40 0 0", false, false, 1, &st) != PM3_SUCCESS) {
         PrintAndLogEx(DEBUG, "DEBUG: Error - Securakey: ASK/Manchester Demod failed");
-        return 0;
+        return PM3_ESOFT;
     }
-    if (st) return 0;
+    if (st)
+        return PM3_ESOFT;
+
     size_t size = DemodBufferLen;
     int ans = detectSecurakey(DemodBuffer, &size);
     if (ans < 0) {
@@ -42,12 +59,12 @@ int CmdSecurakeyDemod(const char *Cmd) {
         else if (ans == -2)
             PrintAndLogEx(DEBUG, "DEBUG: Error - Securakey: preamble not found");
         else if (ans == -3)
-            PrintAndLogEx(DEBUG, "DEBUG: Error - Securakey: Size not correct: %d", size);
+            PrintAndLogEx(DEBUG, "DEBUG: Error - Securakey: Size not correct: %zu", size);
         else
             PrintAndLogEx(DEBUG, "DEBUG: Error - Securakey: ans: %d", ans);
-        return 0;
+        return PM3_ESOFT;
     }
-    setDemodBuf(DemodBuffer, 96, ans);
+    setDemodBuff(DemodBuffer, 96, ans);
     setClockGrid(g_DemodClock, g_DemodStartIdx + (ans * g_DemodClock));
 
     //got a good demod
@@ -73,7 +90,7 @@ int CmdSecurakeyDemod(const char *Cmd) {
     // remove marker bits (0's every 9th digit after preamble) (pType = 3 (always 0s))
     size = removeParity(bits_no_spacer, 0, 9, 3, 85);
     if (size != 85 - 9) {
-        PrintAndLogEx(DEBUG, "DEBUG: Error removeParity: %d", size);
+        PrintAndLogEx(DEBUG, "DEBUG: Error removeParity: %zu", size);
         return 0;
     }
 
@@ -81,7 +98,7 @@ int CmdSecurakeyDemod(const char *Cmd) {
     uint32_t fc = 0, lWiegand = 0, rWiegand = 0;
     if (bitLen > 40) { //securakey's max bitlen is 40 bits...
         PrintAndLogEx(DEBUG, "DEBUG: Error bitLen too long: %u", bitLen);
-        return 0;
+        return PM3_ESOFT;
     }
     // get left 1/2 wiegand & right 1/2 wiegand (for parity test and wiegand print)
     lWiegand = bytebits_to_byte(bits_no_spacer + 48 - bitLen, bitLen / 2);
@@ -100,33 +117,102 @@ int CmdSecurakeyDemod(const char *Cmd) {
     PrintAndLogEx(SUCCESS, "Securakey Tag Found--BitLen: %u, Card ID: %u, FC: 0x%X, Raw: %08X%08X%08X", bitLen, cardid, fc, raw1, raw2, raw3);
     if (bitLen <= 32)
         PrintAndLogEx(SUCCESS, "Wiegand: %08X, Parity: %s", (lWiegand << (bitLen / 2)) | rWiegand, parity ? "Passed" : "Failed");
+
     PrintAndLogEx(INFO, "\nHow the FC translates to printed FC is unknown");
     PrintAndLogEx(INFO, "How the checksum is calculated is unknown");
     PrintAndLogEx(INFO, "Help the community identify this format further\n by sharing your tag on the pm3 forum or with forum members");
-    return 1;
+    return PM3_SUCCESS;
 }
 
-int CmdSecurakeyRead(const char *Cmd) {
-    lf_read(true, 8000);
+static int CmdSecurakeyRead(const char *Cmd) {
+    lf_read(false, 8000);
     return CmdSecurakeyDemod(Cmd);
 }
 
+static int CmdSecurakeyClone(const char *Cmd) {
+
+    uint32_t blocks[4];
+    bool errors = false;
+    uint8_t cmdp = 0;
+    int datalen = 0;
+
+    while (param_getchar(Cmd, cmdp) != 0x00 && !errors) {
+        switch (tolower(param_getchar(Cmd, cmdp))) {
+            case 'h':
+                return usage_lf_securakey_clone();
+            case 'b': {
+                // skip first block,  3*4 = 12 bytes left
+                uint8_t rawhex[12] = {0};
+                int res = param_gethex_to_eol(Cmd, cmdp + 1, rawhex, sizeof(rawhex), &datalen);
+                if (res != 0)
+                    errors = true;
+
+                for (uint8_t i = 1; i < ARRAYLEN(blocks); i++) {
+                    blocks[i] = bytes_to_num(rawhex + ((i - 1) * 4), sizeof(uint32_t));
+                }
+                cmdp += 2;
+                break;
+            }
+            default:
+                PrintAndLogEx(WARNING, "Unknown parameter '%c'", param_getchar(Cmd, cmdp));
+                errors = true;
+                break;
+        }
+    }
+
+    if (errors || cmdp == 0) return usage_lf_securakey_clone();
+
+    //Securakey - compat mode, ASK/Man, data rate 40, 3 data blocks
+    blocks[0] = T55x7_MODULATION_MANCHESTER | T55x7_BITRATE_RF_40 | 3 << T55x7_MAXBLOCK_SHIFT;
+
+    PrintAndLogEx(INFO, "Preparing to clone Securakey to T55x7 with raw hex");
+    print_blocks(blocks,  ARRAYLEN(blocks));
+
+    int res = clone_t55xx_tag(blocks, ARRAYLEN(blocks));
+    PrintAndLogEx(SUCCESS, "Done");
+    PrintAndLogEx(INFO, "Hint: try " _YELLOW_("`lf securakey read`") "to verify");
+    return res;
+}
+
+static int CmdSecurakeySim(const char *Cmd) {
+    PrintAndLogEx(INFO, " To be implemented, feel free to contribute!");
+    return PM3_SUCCESS;
+}
+
 static command_t CommandTable[] = {
-    {"help",  CmdHelp,          1, "This help"},
-    {"demod", CmdSecurakeyDemod, 1, "Demodulate an Securakey tag from the GraphBuffer"},
-    {"read",  CmdSecurakeyRead, 0, "Attempt to read and extract tag data from the antenna"},
-    //{"clone", CmdSecurakeyClone,0, "clone Securakey tag"},
-    //{"sim",   CmdSecurakeydSim, 0, "simulate Securakey tag"},
-    {NULL, NULL, 0, NULL}
+    {"help",  CmdHelp,           AlwaysAvailable, "This help"},
+    {"demod", CmdSecurakeyDemod, AlwaysAvailable, "Demodulate an Securakey tag from the GraphBuffer"},
+    {"read",  CmdSecurakeyRead,  IfPm3Lf,         "Attempt to read and extract tag data from the antenna"},
+    {"clone", CmdSecurakeyClone, IfPm3Lf,         "clone Securakey tag to T55x7"},
+    {"sim",   CmdSecurakeySim,   IfPm3Lf,         "simulate Securakey tag"},
+    {NULL, NULL, NULL, NULL}
 };
+
+static int CmdHelp(const char *Cmd) {
+    (void)Cmd; // Cmd is not used so far
+    CmdsHelp(CommandTable);
+    return PM3_SUCCESS;
+}
 
 int CmdLFSecurakey(const char *Cmd) {
     clearCommandBuffer();
-    CmdsParse(CommandTable, Cmd);
-    return 0;
+    return CmdsParse(CommandTable, Cmd);
 }
 
-int CmdHelp(const char *Cmd) {
-    CmdsHelp(CommandTable);
-    return 0;
+// by marshmellow
+// find Securakey preamble in already demoded data
+int detectSecurakey(uint8_t *dest, size_t *size) {
+    if (*size < 96) return -1; //make sure buffer has data
+    size_t startIdx = 0;
+    uint8_t preamble[] = {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1};
+    if (!preambleSearch(dest, preamble, sizeof(preamble), size, &startIdx))
+        return -2; //preamble not found
+    if (*size != 96) return -3; //wrong demoded size
+    //return start position
+    return (int)startIdx;
 }
+
+int demodSecurakey(void) {
+    return CmdSecurakeyDemod("");
+}
+
